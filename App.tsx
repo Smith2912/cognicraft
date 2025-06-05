@@ -1,17 +1,29 @@
-
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { NodeData, EdgeData, NodeStatus, Point, ChatMessage, AiAction, AiCreateNodeAction, AiCreateSubtasksAction, User, Project } from './types';
+import { NodeData, EdgeData, NodeStatus, Point, ChatMessage, AiAction, AiCreateNodeAction, AiCreateSubtasksAction, User as LegacyUser, Project as LegacyProject } from './types';
 import { NODE_WIDTH, NODE_HEIGHT, GRID_SIZE, HISTORY_LIMIT } from './constants';
 import { sendMessageToChatStream, resetChatHistory as resetGeminiChatHistory } from './services/geminiService';
 import { generatePlanMarkdown } from './services/markdownService';
-import { autoLayoutNodes } from './services/layoutService'; // Added import
+import { autoLayoutNodes } from './services/layoutService';
+
+// New backend service imports
+import { 
+  authService, 
+  projectService, 
+  backendAiService, 
+  migrationService,
+  apiClient,
+  type Project as BackendProject,
+  type User as BackendUser,
+  type MigrationStatus
+} from './services/index.js';
+
 import NodePlannerCanvas, { NodePlannerCanvasHandle } from './components/NodePlannerCanvas';
 import NodeEditorSidebar from './components/NodeEditorSidebar';
 import ChatPanel from './components/ChatPanel';
 import Header from './components/Header';
 import LeftControlsToolbar from './components/LeftControlsToolbar';
 import SettingsPanel from './components/SettingsPanel';
-import ContextMenu from './components/ContextMenu'; // Added ContextMenu import
+import ContextMenu from './components/ContextMenu';
 
 const generateId = (prefix: string = 'id'): string => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
@@ -30,7 +42,17 @@ interface ContextMenuState {
 }
 
 const App: React.FC = () => {
-  const [projects, setProjects] = useState<Project[]>([]);
+  // Backend integration state
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<BackendUser | null>(null);
+  const [backendProjects, setBackendProjects] = useState<BackendProject[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [migrationStatus, setMigrationStatus] = useState<MigrationStatus | null>(null);
+  const [showMigrationDialog, setShowMigrationDialog] = useState<boolean>(false);
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  
+  // Legacy state (for backward compatibility during transition)
+  const [projects, setProjects] = useState<LegacyProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   
   const [nodes, setNodesInternal] = useState<NodeData[]>([]);
@@ -52,7 +74,6 @@ const App: React.FC = () => {
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const canvasRef = useRef<NodePlannerCanvasHandle>(null);
   const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [contextMenuState, setContextMenuState] = useState<ContextMenuState | null>(null);
 
 

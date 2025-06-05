@@ -9,6 +9,7 @@ import { syncModels } from './models/index.js';
 import authRoutes from './routes/auth.js';
 import projectRoutes from './routes/projects.js';
 import canvasRoutes from './routes/canvas.js';
+import aiRoutes from './routes/ai.js';
 
 const app = express();
 
@@ -60,6 +61,9 @@ app.use('/api/v1/auth', authRoutes);
 // Project and canvas routes
 app.use('/api/v1/projects', projectRoutes);
 app.use('/api/v1/projects', canvasRoutes);
+
+// AI routes
+app.use('/api/v1/ai', aiRoutes);
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

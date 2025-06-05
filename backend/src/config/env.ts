@@ -24,15 +24,15 @@ export const config = {
   REFRESH_TOKEN_SECRET: process.env.REFRESH_TOKEN_SECRET || 'your-super-secret-refresh-token-key',
 
   // GitHub OAuth
-  GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID!,
-  GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET!,
+  GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID || '',
+  GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET || '',
   GITHUB_CALLBACK_URL: process.env.GITHUB_CALLBACK_URL || 'http://localhost:3001/api/v1/auth/github/callback',
 
   // Frontend URL
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
 
   // AI Configuration
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY!,
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
   GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-1.5-pro',
 
   // Stripe Configuration
@@ -48,17 +48,28 @@ export const config = {
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 };
 
-// Validate required environment variables
-const requiredEnvVars = [
-  'GITHUB_CLIENT_ID',
-  'GITHUB_CLIENT_SECRET',
-  'GEMINI_API_KEY'
-];
+// Validate required environment variables for production
+if (config.NODE_ENV === 'production') {
+  const requiredEnvVars = [
+    'GITHUB_CLIENT_ID',
+    'GITHUB_CLIENT_SECRET',
+    'GEMINI_API_KEY'
+  ];
 
-for (const envVar of requiredEnvVars) {
-  if (!process.env[envVar]) {
-    console.error(`❌ Missing required environment variable: ${envVar}`);
-    process.exit(1);
+  for (const envVar of requiredEnvVars) {
+    if (!process.env[envVar]) {
+      console.error(`❌ Missing required environment variable: ${envVar}`);
+      process.exit(1);
+    }
+  }
+} else {
+  // Development mode - warn about missing keys but don't exit
+  const optionalInDev = ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GEMINI_API_KEY'];
+  
+  for (const envVar of optionalInDev) {
+    if (!process.env[envVar]) {
+      console.warn(`⚠️  Missing environment variable: ${envVar} (features will be disabled)`);
+    }
   }
 }
 
