@@ -1,8 +1,7 @@
-
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { NodeData, EdgeData, NodeStatus, Point, ChatMessage, AiAction, AiCreateNodeAction, AiCreateSubtasksAction, User, Project } from './types';
 import { NODE_WIDTH, NODE_HEIGHT, GRID_SIZE, HISTORY_LIMIT } from './constants';
-import { sendMessageToChatStream, resetChatHistory as resetGeminiChatHistory } from './services/geminiService';
+import { llmService } from './services/llmService';
 import { generatePlanMarkdown } from './services/markdownService';
 import { autoLayoutNodes } from './services/layoutService'; // Added import
 import NodePlannerCanvas, { NodePlannerCanvasHandle } from './components/NodePlannerCanvas';
@@ -55,6 +54,13 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [contextMenuState, setContextMenuState] = useState<ContextMenuState | null>(null);
 
+  // Initialize LLM service with auth token from localStorage if available
+  useEffect(() => {
+    const savedAuthToken = localStorage.getItem('cognicraft_auth_token');
+    if (savedAuthToken) {
+      llmService.setAuthToken(savedAuthToken);
+    }
+  }, []);
 
   const getProjectScopedKey = (baseKey: string, projectId?: string | null) => {
     const pid = projectId || currentProjectId;
@@ -708,7 +714,7 @@ const App: React.FC = () => {
     
     let fullAiResponse = "";
     
-    await sendMessageToChatStream(
+    await llmService.sendMessageToChatStream(
       messageText,
       (chunkText, isFinalChunk) => { 
         if (!isFinalChunk) {
@@ -752,7 +758,7 @@ const App: React.FC = () => {
 
   const handleResetChat = useCallback(() => {
     if (!currentProjectId) return;
-    resetGeminiChatHistory(); 
+    llmService.resetChatHistory(); 
     setChatMessages([{
         id: generateId('ai-greet'), sender: 'ai',
         text: "Chat history reset. How can I assist?", timestamp: Date.now()

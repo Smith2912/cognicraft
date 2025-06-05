@@ -88,13 +88,26 @@ npm start
 3. Deploy automatically on push to main branch
 
 ### Required Environment Variables for Production
-```
+```bash
 NODE_ENV=production
 PORT=3001
 DATABASE_URL=postgresql://... (Railway provides this)
 JWT_SECRET=your-production-jwt-secret
 GITHUB_CLIENT_ID=your-github-oauth-client-id
 GITHUB_CLIENT_SECRET=your-github-oauth-client-secret
-GEMINI_API_KEY=your-gemini-api-key
+OPENROUTER_API_KEY=your-openrouter-api-key
 FRONTEND_URL=https://your-frontend-domain.com
-``` 
+```
+
+# Required Environment Variables
+DATABASE_URL=postgresql://user:password@localhost:5432/cognicraft
+JWT_SECRET=your-super-secret-jwt-key
+GITHUB_CLIENT_ID=your-github-client-id
+GITHUB_CLIENT_SECRET=your-github-client-secret
+OPENROUTER_API_KEY=your-openrouter-api-key
+
+# Optional Environment Variables
+NODE_ENV=development
+PORT=3001
+FRONTEND_URL=http://localhost:5173
+DEFAULT_LLM_MODEL=google/gemini-2.0-flash-exp:free 

@@ -1,5 +1,8 @@
 import { NodeStatus } from './types';
 
+// API Configuration
+export const API_BASE_URL = process.env.VITE_API_BASE_URL || 'http://localhost:3001/api/v1';
+
 export const NODE_WIDTH = 220; // Adjusted for new design
 export const NODE_HEIGHT = 100; // Adjusted for new design
 export const GEMINI_API_KEY = process.env.API_KEY; // Assume API_KEY is in process.env

@@ -4,6 +4,7 @@ import User from './User.js';
 import Project from './Project.js';
 import Node from './Node.js';
 import Edge from './Edge.js';
+import ChatMessage from './ChatMessage.js';
 
 // Define associations
 // User -> Projects (One-to-Many)
@@ -60,13 +61,25 @@ Edge.belongsTo(Node, {
   as: 'targetNode'
 });
 
+// Project -> ChatMessages (One-to-Many)
+Project.hasMany(ChatMessage, {
+  foreignKey: 'project_id',
+  as: 'chatMessages'
+});
+
+ChatMessage.belongsTo(Project, {
+  foreignKey: 'project_id',
+  as: 'project'
+});
+
 // Export all models
 export {
   sequelize,
   User,
   Project,
   Node,
-  Edge
+  Edge,
+  ChatMessage
 };
 
 // Sync database function
@@ -86,5 +99,6 @@ export default {
   Project,
   Node,
   Edge,
+  ChatMessage,
   syncModels
 }; 

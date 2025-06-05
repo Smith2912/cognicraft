@@ -32,8 +32,8 @@ export const config = {
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
 
   // AI Configuration
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY!,
-  GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-1.5-pro',
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY!,
+  DEFAULT_LLM_MODEL: process.env.DEFAULT_LLM_MODEL || 'google/gemini-2.0-flash-exp:free',
 
   // Stripe Configuration
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
@@ -52,7 +52,7 @@ export const config = {
 const requiredEnvVars = [
   'GITHUB_CLIENT_ID',
   'GITHUB_CLIENT_SECRET',
-  'GEMINI_API_KEY'
+  'OPENROUTER_API_KEY'
 ];
 
 for (const envVar of requiredEnvVars) {

@@ -1,7 +1,7 @@
-
 import React from 'react';
 import { PlusIcon, AppIcon, CogIcon, TrashIcon, UserCircleIcon, GithubIcon } from './icons'; // Added GithubIcon
 import { User } from '../types';
+import { ModelSelector } from './ModelSelector';
 
 interface HeaderProps {
   onCreateNode: () => void;
@@ -48,7 +48,9 @@ const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      <div className="flex-1 min-w-0"></div> {/* Spacer */}
+      <div className="flex-1 flex items-center justify-center">
+        <ModelSelector />
+      </div>
 
       <div className="flex items-center space-x-2 flex-shrink-0">
         {currentProjectTeamAvatars.length > 0 && (
