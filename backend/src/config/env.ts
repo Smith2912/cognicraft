@@ -32,6 +32,11 @@ export const config = {
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
 
   // AI Configuration
+  AI_PROVIDER: process.env.AI_PROVIDER || 'openrouter', // 'openrouter' or 'gemini'
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet',
+  OPENROUTER_SITE_URL: process.env.OPENROUTER_SITE_URL || 'https://cognicraft.ai',
+  OPENROUTER_APP_NAME: process.env.OPENROUTER_APP_NAME || 'CogniCraft',
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
   GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-1.5-pro',
 
@@ -52,9 +57,15 @@ export const config = {
 if (config.NODE_ENV === 'production') {
   const requiredEnvVars = [
     'GITHUB_CLIENT_ID',
-    'GITHUB_CLIENT_SECRET',
-    'GEMINI_API_KEY'
+    'GITHUB_CLIENT_SECRET'
   ];
+
+  // Add AI provider specific requirements
+  if (config.AI_PROVIDER === 'openrouter') {
+    requiredEnvVars.push('OPENROUTER_API_KEY');
+  } else if (config.AI_PROVIDER === 'gemini') {
+    requiredEnvVars.push('GEMINI_API_KEY');
+  }
 
   for (const envVar of requiredEnvVars) {
     if (!process.env[envVar]) {
@@ -64,7 +75,13 @@ if (config.NODE_ENV === 'production') {
   }
 } else {
   // Development mode - warn about missing keys but don't exit
-  const optionalInDev = ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GEMINI_API_KEY'];
+  const optionalInDev = ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET'];
+  
+  if (config.AI_PROVIDER === 'openrouter') {
+    optionalInDev.push('OPENROUTER_API_KEY');
+  } else if (config.AI_PROVIDER === 'gemini') {
+    optionalInDev.push('GEMINI_API_KEY');
+  }
   
   for (const envVar of optionalInDev) {
     if (!process.env[envVar]) {

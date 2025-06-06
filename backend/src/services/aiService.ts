@@ -1,5 +1,8 @@
+import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../config/env.js';
+import { getModelById, DEFAULT_MODELS, type AIModelInfo } from '../config/aiModels.js';
+import type { User } from '../models/User.js';
 
 export interface AIMessage {
   role: 'user' | 'assistant';
@@ -47,71 +50,220 @@ export interface ProjectSuggestion {
 }
 
 class AIService {
+  private openai: OpenAI | null = null;
   private genAI: GoogleGenerativeAI | null = null;
-  private model: any = null;
+  private geminiModel: any = null;
+  private activeProvider: 'openrouter' | 'gemini' | null = null;
 
   constructor() {
-    if (config.GEMINI_API_KEY) {
+    this.initializeProviders();
+  }
+
+  private initializeProviders(): void {
+    // Try OpenRouter first (preferred)
+    if (config.OPENROUTER_API_KEY && config.AI_PROVIDER === 'openrouter') {
+      try {
+        this.openai = new OpenAI({
+          apiKey: config.OPENROUTER_API_KEY,
+          baseURL: 'https://openrouter.ai/api/v1',
+          defaultHeaders: {
+            'HTTP-Referer': config.OPENROUTER_SITE_URL,
+            'X-Title': config.OPENROUTER_APP_NAME,
+          },
+        });
+        this.activeProvider = 'openrouter';
+        console.log(`✅ OpenRouter AI service initialized with model: ${config.OPENROUTER_MODEL}`);
+      } catch (error) {
+        console.error('❌ Failed to initialize OpenRouter AI:', error);
+      }
+    }
+
+    // Initialize Gemini as fallback
+    if (config.GEMINI_API_KEY && (!this.activeProvider || config.AI_PROVIDER === 'gemini')) {
       try {
         this.genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY);
-        this.model = this.genAI.getGenerativeModel({ model: 'gemini-pro' });
-        console.log('✅ Gemini AI service initialized');
+        this.geminiModel = this.genAI.getGenerativeModel({ model: config.GEMINI_MODEL });
+        
+        if (!this.activeProvider) {
+          this.activeProvider = 'gemini';
+          console.log(`✅ Gemini AI service initialized as primary with model: ${config.GEMINI_MODEL}`);
+        } else {
+          console.log(`✅ Gemini AI service initialized as fallback`);
+        }
       } catch (error) {
         console.error('❌ Failed to initialize Gemini AI:', error);
       }
-    } else {
-      console.warn('⚠️  GEMINI_API_KEY not provided - AI features will be disabled');
+    }
+
+    if (!this.activeProvider) {
+      console.warn('⚠️  No AI providers available - AI features will be disabled');
     }
   }
 
   public isAvailable(): boolean {
-    return this.model !== null;
+    return this.activeProvider !== null;
   }
 
-  public async generateResponse(messages: AIMessage[]): Promise<AIResponse> {
+  public getActiveProvider(): string {
+    return this.activeProvider || 'none';
+  }
+
+  // Get the model to use for a specific user
+  public getUserModel(user?: User): { model: string; provider: 'openrouter' | 'gemini' } {
+    // If no user provided, use system defaults
+    if (!user) {
+      return {
+        model: config.OPENROUTER_MODEL,
+        provider: this.activeProvider === 'gemini' ? 'gemini' : 'openrouter'
+      };
+    }
+
+    // Check user's AI provider preference
+    const preferredProvider = user.ai_provider_preference || 'auto';
+    let targetProvider: 'openrouter' | 'gemini';
+
+    if (preferredProvider === 'auto') {
+      // Use the active provider (OpenRouter first, then Gemini)
+      targetProvider = this.activeProvider === 'gemini' ? 'gemini' : 'openrouter';
+    } else {
+      targetProvider = preferredProvider;
+    }
+
+    // Get user's preferred model or use defaults
+    let modelId = user.preferred_ai_model;
+    
+    if (!modelId) {
+      // Use appropriate default based on subscription
+      if (user.subscription_tier === 'free') {
+        modelId = DEFAULT_MODELS.FREE_DEVELOPMENT;
+      } else {
+        modelId = DEFAULT_MODELS.PREMIUM_PRODUCTION;
+      }
+    }
+
+    // Validate the model exists and is compatible with the provider
+    const modelInfo = getModelById(modelId);
+    if (!modelInfo || modelInfo.provider !== targetProvider) {
+      // Fallback to appropriate default
+      if (targetProvider === 'openrouter') {
+        modelId = user.subscription_tier === 'free' 
+          ? DEFAULT_MODELS.FREE_DEVELOPMENT 
+          : DEFAULT_MODELS.PREMIUM_PRODUCTION;
+      } else {
+        modelId = DEFAULT_MODELS.GEMINI_FALLBACK;
+      }
+    }
+
+    return {
+      model: modelId,
+      provider: targetProvider
+    };
+  }
+
+  public async generateResponse(messages: AIMessage[], user?: User): Promise<AIResponse> {
     if (!this.isAvailable()) {
       throw new Error('AI service is not available');
     }
 
-    try {
-      // Convert messages to Gemini format
-      const conversation = messages
-        .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
-        .join('\n\n');
+    // Get user-specific model configuration
+    const userModel = this.getUserModel(user);
 
-      const result = await this.model.generateContent(conversation);
-      const response = await result.response;
-      const text = response.text();
-
-      return {
-        content: text,
-        usage: {
-          prompt_tokens: 0, // Gemini doesn't provide exact token counts
-          completion_tokens: 0,
-          total_tokens: 0
+    // Try user's preferred provider first
+    if (userModel.provider === 'openrouter' && this.openai) {
+      try {
+        return await this.generateOpenRouterResponse(messages, userModel.model);
+      } catch (error) {
+        console.error('OpenRouter request failed, falling back to Gemini:', error);
+        
+        // Fall back to Gemini if available
+        if (this.geminiModel) {
+          return await this.generateGeminiResponse(messages, DEFAULT_MODELS.GEMINI_FALLBACK);
         }
-      };
-
-    } catch (error) {
-      console.error('Error generating AI response:', error);
-      throw new Error('Failed to generate AI response');
+        throw error;
+      }
     }
+
+    // Use Gemini
+    if (userModel.provider === 'gemini' && this.geminiModel) {
+      return await this.generateGeminiResponse(messages, userModel.model);
+    }
+
+    // Fallback to system default
+    if (this.activeProvider === 'openrouter' && this.openai) {
+      return await this.generateOpenRouterResponse(messages, config.OPENROUTER_MODEL);
+    }
+
+    if (this.activeProvider === 'gemini' && this.geminiModel) {
+      return await this.generateGeminiResponse(messages, config.GEMINI_MODEL);
+    }
+
+    throw new Error('No AI provider available');
   }
 
-  public async analyzeProject(request: ProjectAnalysisRequest): Promise<ProjectSuggestion> {
+  private async generateOpenRouterResponse(messages: AIMessage[], modelId?: string): Promise<AIResponse> {
+    if (!this.openai) throw new Error('OpenRouter not initialized');
+
+    const chatMessages = messages.map(msg => ({
+      role: msg.role === 'user' ? 'user' as const : 'assistant' as const,
+      content: msg.content
+    }));
+
+    const completion = await this.openai.chat.completions.create({
+      model: modelId || config.OPENROUTER_MODEL,
+      messages: chatMessages,
+      temperature: 0.7,
+      max_tokens: 4000,
+    });
+
+    const content = completion.choices[0]?.message?.content || '';
+    const usage = completion.usage;
+
+    return {
+      content,
+      usage: usage ? {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens
+      } : undefined
+    };
+  }
+
+  private async generateGeminiResponse(messages: AIMessage[], modelId?: string): Promise<AIResponse> {
+    if (!this.geminiModel) throw new Error('Gemini not initialized');
+
+    // For Gemini, we use the initialized model (modelId parameter is mainly for logging/tracking)
+    // Convert messages to Gemini format
+    const conversation = messages
+      .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+      .join('\n\n');
+
+    const result = await this.geminiModel.generateContent(conversation);
+    const response = await result.response;
+    const text = response.text();
+
+    return {
+      content: text,
+      usage: {
+        prompt_tokens: 0, // Gemini doesn't provide exact token counts
+        completion_tokens: 0,
+        total_tokens: 0
+      }
+    };
+  }
+
+  public async analyzeProject(request: ProjectAnalysisRequest, user?: User): Promise<ProjectSuggestion> {
     if (!this.isAvailable()) {
       throw new Error('AI service is not available');
     }
 
     try {
       const prompt = this.buildProjectAnalysisPrompt(request);
-      
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
+      const messages: AIMessage[] = [
+        { role: 'user', content: prompt }
+      ];
 
-      // Parse the AI response into structured format
-      return this.parseProjectSuggestion(text, request);
+      const response = await this.generateResponse(messages, user);
+      return this.parseProjectSuggestion(response.content, request);
 
     } catch (error) {
       console.error('Error analyzing project:', error);
@@ -143,12 +295,14 @@ Format your response as a simple numbered list:
 etc.
 `;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
+      const messages: AIMessage[] = [
+        { role: 'user', content: prompt }
+      ];
+
+      const response = await this.generateResponse(messages);
 
       // Extract numbered list items
-      const subtasks = text
+      const subtasks = response.content
         .split('\n')
         .filter((line: string) => /^\d+\./.test(line.trim()))
         .map((line: string) => line.replace(/^\d+\.\s*/, '').trim())
@@ -190,12 +344,14 @@ Provide 3-5 specific recommendations to improve this workflow:
 Format your response as a numbered list of actionable recommendations.
 `;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
+      const messages: AIMessage[] = [
+        { role: 'user', content: prompt }
+      ];
+
+      const response = await this.generateResponse(messages);
 
       // Extract numbered recommendations
-      const recommendations = text
+      const recommendations = response.content
         .split('\n')
         .filter((line: string) => /^\d+\./.test(line.trim()))
         .map((line: string) => line.replace(/^\d+\.\s*/, '').trim())
@@ -210,54 +366,47 @@ Format your response as a numbered list of actionable recommendations.
   }
 
   private buildProjectAnalysisPrompt(request: ProjectAnalysisRequest): string {
-    const existingNodesText = request.existingNodes?.length 
-      ? request.existingNodes.map(n => `- ${n.title}: ${n.description || 'No description'}`).join('\n')
-      : 'None';
+    const existingNodesText = request.existingNodes && request.existingNodes.length > 0
+      ? `\n\nExisting nodes:\n${request.existingNodes.map(n => `- ${n.title}: ${n.description || n.status}`).join('\n')}`
+      : '';
 
     return `
-Analyze this ${request.projectType || 'software'} project and suggest a comprehensive development plan:
+Analyze this ${request.projectType || 'software'} project and suggest a comprehensive task breakdown:
 
 Project: ${request.projectName}
 ${request.githubRepoUrl ? `Repository: ${request.githubRepoUrl}` : ''}
 ${request.additionalContext ? `Context: ${request.additionalContext}` : ''}
-
-Existing tasks:
 ${existingNodesText}
 
-Please suggest 8-15 development tasks that would complete this project. For each task:
-- Provide a clear, specific title
-- Write a detailed description (2-3 sentences)
-- Estimate hours needed (realistic development time)
-- Assign priority (high/medium/low)
-- List dependencies (titles of other tasks that must be completed first)
-- Add relevant tags (e.g., "frontend", "backend", "testing", "deployment")
-
-Also suggest logical connections between tasks and provide 3-5 high-level recommendations for the project.
-
-Format your response as JSON with this structure:
+Please provide a JSON response with the following structure:
 {
   "suggestedNodes": [
     {
-      "title": "Task Title",
+      "id": "unique-id",
+      "title": "Task title",
       "description": "Detailed description",
       "estimatedHours": 8,
-      "priority": "high",
-      "dependencies": ["Other Task Title"],
-      "tags": ["frontend", "api"]
+      "priority": "high|medium|low",
+      "dependencies": ["other-node-ids"],
+      "tags": ["frontend", "backend", "api"]
     }
   ],
-  "connections": [
+  "suggestedEdges": [
     {
-      "source": "Source Task Title",
-      "target": "Target Task Title",
-      "type": "dependency"
+      "id": "edge-id",
+      "source": "source-node-id",
+      "target": "target-node-id",
+      "type": "dependency|sequence|optional"
     }
   ],
   "recommendations": [
-    "High-level recommendation 1",
-    "High-level recommendation 2"
+    "Strategic recommendation 1",
+    "Strategic recommendation 2"
   ]
 }
+
+Focus on practical, implementable tasks for a ${request.projectType || 'software'} project.
+Each task should be specific, actionable, and properly scoped.
 `;
   }
 
@@ -267,41 +416,36 @@ Format your response as JSON with this structure:
       const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        
-        // Generate UUIDs for nodes and edges
-        const suggestedNodes = parsed.suggestedNodes.map((node: any) => ({
-          id: this.generateId(),
-          ...node
-        }));
-
-        const suggestedEdges = (parsed.connections || []).map((conn: any) => ({
-          id: this.generateId(),
-          source: this.findNodeIdByTitle(suggestedNodes, conn.source),
-          target: this.findNodeIdByTitle(suggestedNodes, conn.target),
-          type: conn.type || 'dependency'
-        })).filter((edge: any) => edge.source && edge.target);
-
         return {
-          suggestedNodes,
-          suggestedEdges,
+          suggestedNodes: parsed.suggestedNodes || [],
+          suggestedEdges: parsed.suggestedEdges || [],
           recommendations: parsed.recommendations || []
         };
       }
     } catch (error) {
-      console.error('Failed to parse AI response as JSON:', error);
+      console.warn('Failed to parse AI response as JSON, using fallback parsing');
     }
 
-    // Fallback: return empty suggestions
+    // Fallback: create a simple structure
     return {
-      suggestedNodes: [],
+      suggestedNodes: [
+        {
+          id: this.generateId(),
+          title: `Plan ${request.projectName}`,
+          description: 'Break down the project requirements and create a development plan',
+          estimatedHours: 4,
+          priority: 'high' as const,
+          dependencies: [],
+          tags: ['planning']
+        }
+      ],
       suggestedEdges: [],
-      recommendations: ['Unable to parse AI suggestions. Please try again.']
+      recommendations: [
+        'Consider breaking down large tasks into smaller, more manageable pieces',
+        'Define clear acceptance criteria for each task',
+        'Plan for testing and quality assurance'
+      ]
     };
-  }
-
-  private findNodeIdByTitle(nodes: any[], title: string): string | null {
-    const node = nodes.find(n => n.title === title);
-    return node ? node.id : null;
   }
 
   private generateId(): string {
@@ -309,5 +453,5 @@ Format your response as JSON with this structure:
   }
 }
 
-// Export singleton instance
-export const aiService = new AIService(); 
+export const aiService = new AIService();
+export default aiService; 

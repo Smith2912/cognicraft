@@ -12,6 +12,8 @@ export interface UserAttributes {
   password_hash?: string;
   github_id?: string;
   subscription_tier: 'free' | 'pro';
+  preferred_ai_model?: string;
+  ai_provider_preference?: 'openrouter' | 'gemini' | 'auto';
   created_at: Date;
   updated_at: Date;
 }
@@ -24,6 +26,8 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   declare password_hash: CreationOptional<string>;
   declare github_id: CreationOptional<string>;
   declare subscription_tier: CreationOptional<'free' | 'pro'>;
+  declare preferred_ai_model: CreationOptional<string>;
+  declare ai_provider_preference: CreationOptional<'openrouter' | 'gemini' | 'auto'>;
   declare created_at: CreationOptional<Date>;
   declare updated_at: CreationOptional<Date>;
 
@@ -82,6 +86,16 @@ User.init({
   subscription_tier: {
     type: DataTypes.ENUM('free', 'pro'),
     defaultValue: 'free',
+    allowNull: false
+  },
+  preferred_ai_model: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: 'openai/gpt-3.5-turbo' // Default to free model
+  },
+  ai_provider_preference: {
+    type: DataTypes.ENUM('openrouter', 'gemini', 'auto'),
+    defaultValue: 'auto',
     allowNull: false
   },
   created_at: {

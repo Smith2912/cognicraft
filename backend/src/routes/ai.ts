@@ -3,6 +3,8 @@ import { authenticateToken, AuthenticatedRequest } from '../middleware/auth.js';
 import { aiService } from '../services/aiService.js';
 import { body, param, validationResult } from 'express-validator';
 import { Project, Node, Edge } from '../models/index.js';
+import { AVAILABLE_AI_MODELS, getFreeModels, getModelsByProvider, getModelById } from '../config/aiModels.js';
+import type { User } from '../models/User.js';
 
 const router = express.Router();
 
@@ -248,5 +250,161 @@ router.post('/optimize-workflow/:projectId',
     }
   }
 );
+
+// Get available AI models
+router.get('/models', authenticateToken, async (req, res) => {
+  try {
+    const user = req.user as User;
+    const { free_only, provider } = req.query;
+
+    let models = AVAILABLE_AI_MODELS;
+
+    // Filter by free models if requested
+    if (free_only === 'true') {
+      models = getFreeModels();
+    }
+
+    // Filter by provider if requested
+    if (provider && (provider === 'openrouter' || provider === 'gemini')) {
+      models = getModelsByProvider(provider);
+    }
+
+    // Filter free models for free tier users
+    if (user.subscription_tier === 'free') {
+      models = models.filter(model => model.isFree);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        models,
+        user_preferences: {
+          preferred_model: user.preferred_ai_model,
+          provider_preference: user.ai_provider_preference,
+          subscription_tier: user.subscription_tier
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching models:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch available models'
+    });
+  }
+});
+
+// Update user AI preferences
+router.put('/preferences', authenticateToken, async (req, res) => {
+  try {
+    const user = req.user as User;
+    const { preferred_ai_model, ai_provider_preference } = req.body;
+
+    // Validate model selection
+    if (preferred_ai_model) {
+      const modelInfo = getModelById(preferred_ai_model);
+      if (!modelInfo) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid model ID'
+        });
+      }
+
+      // Check if free user is trying to select premium model
+      if (user.subscription_tier === 'free' && !modelInfo.isFree) {
+        return res.status(403).json({
+          success: false,
+          error: 'Premium models require a Pro subscription'
+        });
+      }
+    }
+
+    // Validate provider preference
+    if (ai_provider_preference && !['openrouter', 'gemini', 'auto'].includes(ai_provider_preference)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid provider preference'
+      });
+    }
+
+    // Update user preferences
+    const updateData: Partial<User> = {};
+    if (preferred_ai_model !== undefined) {
+      updateData.preferred_ai_model = preferred_ai_model;
+    }
+    if (ai_provider_preference !== undefined) {
+      updateData.ai_provider_preference = ai_provider_preference;
+    }
+
+    await user.update(updateData);
+
+    res.json({
+      success: true,
+      message: 'AI preferences updated successfully',
+      data: {
+        preferred_ai_model: user.preferred_ai_model,
+        ai_provider_preference: user.ai_provider_preference
+      }
+    });
+  } catch (error) {
+    console.error('Error updating AI preferences:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update AI preferences'
+    });
+  }
+});
+
+// Analyze project with user's preferred model
+router.post('/analyze', authenticateToken, async (req, res) => {
+  try {
+    const user = req.user as User;
+    const { 
+      name, 
+      description, 
+      type = 'general', 
+      scope = 'medium',
+      requirements = [],
+      constraints = []
+    } = req.body;
+
+    if (!name || !description) {
+      return res.status(400).json({
+        success: false,
+        error: 'Project name and description are required'
+      });
+    }
+
+    const analysisRequest = {
+      projectName: name,
+      description,
+      type,
+      scope,
+      requirements,
+      constraints
+    };
+
+    const suggestions = await aiService.analyzeProject(analysisRequest, user);
+
+    res.json({
+      success: true,
+      data: suggestions
+    });
+  } catch (error) {
+    console.error('Error analyzing project:', error);
+    
+    if (error instanceof Error && error.message === 'AI service is not available') {
+      return res.status(503).json({
+        success: false,
+        error: 'AI service is temporarily unavailable'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to analyze project'
+    });
+  }
+});
 
 export default router; 

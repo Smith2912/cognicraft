@@ -40,7 +40,7 @@ backend/
 - **Framework:** Express.js with TypeScript
 - **Database:** PostgreSQL with Sequelize ORM
 - **Authentication:** JWT + GitHub OAuth (Passport.js)
-- **AI:** Google Gemini API integration
+- **AI:** OpenRouter (primary) & Google Gemini (fallback)
 - **Validation:** express-validator
 - **Security:** helmet, cors, rate limiting
 - **Development:** tsx, nodemon
@@ -140,12 +140,17 @@ OAuth flow:
 
 ## 🤖 AI Integration
 
+### Providers:
+- **OpenRouter** (Primary): Access to Claude-3.5-Sonnet, GPT-4, and other models
+- **Gemini** (Fallback): Google's Generative AI
+
 ### Available AI Features:
 
 1. **Project Analysis** - Analyzes project and suggests tasks
 2. **Task Breakdown** - Breaks complex tasks into subtasks  
 3. **Workflow Optimization** - Suggests improvements to task flow
 4. **General Chat** - AI assistant for development questions
+5. **Model Selection** - Configure preferred AI model via environment
 
 ### Example AI Request:
 ```bash
@@ -185,7 +190,9 @@ npm run seed
 
 2. **Set up GitHub OAuth:** Follow `GITHUB_OAUTH_SETUP.md`
 
-3. **Get Gemini API key:** https://makersuite.google.com/app/apikey
+3. **Get AI API keys:**
+   - OpenRouter: https://openrouter.ai/keys (recommended)
+   - Gemini: https://makersuite.google.com/app/apikey (fallback)
 
 4. **Key environment variables:**
    ```env
@@ -193,8 +200,11 @@ npm run seed
    GITHUB_CLIENT_ID=your_github_client_id
    GITHUB_CLIENT_SECRET=your_github_client_secret
    
-   # AI Integration (required for AI features)  
-   GEMINI_API_KEY=your_gemini_api_key
+   # AI Integration (choose one or both)
+   AI_PROVIDER=openrouter
+   OPENROUTER_API_KEY=sk-or-v1-your_openrouter_api_key
+   OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+   GEMINI_API_KEY=your_gemini_api_key  # fallback
    
    # Security (generate strong keys)
    JWT_SECRET=your-super-secret-jwt-key

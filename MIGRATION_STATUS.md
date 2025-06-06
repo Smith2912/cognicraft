@@ -4,6 +4,24 @@
 
 We're in **Phase 2** of the CogniCraft development roadmap, transitioning from localStorage-based persistence to full backend integration.
 
+## 🚀 **NEW: User-Configurable AI Models**
+
+**Just Completed:** User-selectable AI models with focus on free options!
+
+### ✅ **What's New:**
+- **🆓 Free Models Priority**: 5+ free models available (GPT-3.5, Mistral 7B, WizardLM 2, etc.)
+- **👤 User Preferences**: Each user can select their preferred model and provider
+- **🔄 Smart Defaults**: Auto-select appropriate models based on subscription tier
+- **🧪 Model Testing**: Users can test models before switching
+- **💰 Cost Protection**: Free tier users limited to free models only
+- **⚙️ Provider Choice**: OpenRouter, Gemini, or Auto selection
+
+### 🎯 **Benefits:**
+- **Cost Control**: Free users get access to powerful free models
+- **User Choice**: Flexibility to choose speed vs quality vs cost
+- **Testing Capability**: Try before you commit to a model
+- **Smart Fallbacks**: Automatic provider switching if preferred fails
+
 ## ✅ Completed Infrastructure
 
 ### Backend API (Phase 1 - Complete)
@@ -11,7 +29,7 @@ We're in **Phase 2** of the CogniCraft development roadmap, transitioning from l
 - ✅ PostgreSQL database with Sequelize ORM
 - ✅ GitHub OAuth authentication with JWT tokens
 - ✅ Complete REST API for projects, nodes, edges
-- ✅ AI service integration (Gemini proxy)
+- ✅ **AI service integration (User-configurable models with OpenRouter + Gemini)**
 - ✅ Security middleware and rate limiting
 - ✅ Railway deployment configuration
 
@@ -20,7 +38,8 @@ We're in **Phase 2** of the CogniCraft development roadmap, transitioning from l
 - ✅ **Configuration**: Environment-based API endpoint management
 - ✅ **Authentication Service**: GitHub OAuth flow and token management
 - ✅ **Project Service**: Full CRUD operations for projects and canvas data
-- ✅ **Backend AI Service**: AI capabilities through backend proxy
+- ✅ **Backend AI Service**: AI capabilities through backend proxy with user model selection
+- ✅ **AI Model Service**: User-configurable model selection and testing
 - ✅ **Migration Service**: localStorage to backend data migration utility
 - ✅ **Authentication Wrapper**: React context for auth state management
 - ✅ **Migration Dialog**: Beautiful UI for migration flow with loading states
