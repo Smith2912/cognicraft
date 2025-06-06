@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage } from '../types';
 import { SparklesIcon } from './icons'; 
@@ -15,11 +14,21 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ messages, onSendMessage, isAiTypi
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Safety check: Ensure messages is always an array
+  const safeMessages = Array.isArray(messages) ? messages : [];
+
+  // Debug logging if messages is not an array
+  useEffect(() => {
+    if (!Array.isArray(messages)) {
+      console.error('[ChatPanel] messages prop is not an array:', messages);
+    }
+  }, [messages]);
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  useEffect(scrollToBottom, [messages]);
+  useEffect(scrollToBottom, [safeMessages]);
 
   const handleSend = () => {
     if (inputText.trim() && !disabled) {
@@ -50,7 +59,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ messages, onSendMessage, isAiTypi
       </div>
 
       <div className="flex-grow p-4 overflow-y-auto space-y-3 bg-dark-surface">
-        {messages.map((msg) => (
+        {safeMessages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
               className={`max-w-xs lg:max-w-sm px-3.5 py-2.5 rounded-xl shadow-md ${
@@ -73,7 +82,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ messages, onSendMessage, isAiTypi
             </div>
           </div>
         ))}
-        {isAiTyping && messages[messages.length -1]?.sender === 'user' && !disabled && (
+        {isAiTyping && safeMessages[safeMessages.length -1]?.sender === 'user' && !disabled && (
              <div className="flex justify-start">
                 <div className="max-w-xs lg:max-w-sm px-3.5 py-2.5 rounded-xl shadow-md bg-dark-card text-dark-text-primary border border-dark-border">
                     <div className="flex items-center justify-center space-x-1">

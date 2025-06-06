@@ -12,6 +12,85 @@ interface AIModelSelectorProps {
   onModelChanged?: (modelId: string) => void;
 }
 
+// Global flag to prevent multiple concurrent API calls across all instances
+let isGloballyLoading = false;
+let globalModelsCache: {
+  models: AIModel[];
+  userPreferences: UserAIPreferences;
+  isLocalMode: boolean;
+} | null = null;
+
+// Fallback models for local/development mode
+const FALLBACK_MODELS: AIModel[] = [
+  {
+    id: 'openai/gpt-3.5-turbo',
+    name: 'GPT-3.5 Turbo',
+    provider: 'openrouter',
+    description: 'Fast and capable model for most tasks. Great for development and testing.',
+    isFree: true,
+    maxTokens: 4096,
+    capabilities: ['chat', 'analysis', 'coding'],
+    recommendedFor: ['Development', 'Testing', 'General Use'],
+    speed: 'fast',
+    quality: 'good'
+  },
+  {
+    id: 'mistralai/mistral-7b-instruct',
+    name: 'Mistral 7B Instruct',
+    provider: 'openrouter',
+    description: 'Open-source model that\'s efficient and capable for most coding tasks.',
+    isFree: true,
+    maxTokens: 8192,
+    capabilities: ['chat', 'analysis', 'coding'],
+    recommendedFor: ['Development', 'Code Analysis', 'Task Planning'],
+    speed: 'fast',
+    quality: 'good'
+  },
+  {
+    id: 'microsoft/wizardlm-2-8x22b',
+    name: 'WizardLM 2 8x22B',
+    provider: 'openrouter',
+    description: 'Powerful open-source model with strong reasoning capabilities.',
+    isFree: true,
+    maxTokens: 65536,
+    capabilities: ['chat', 'analysis', 'coding', 'reasoning'],
+    recommendedFor: ['Complex Analysis', 'Project Planning', 'Code Review'],
+    speed: 'medium',
+    quality: 'excellent'
+  },
+  {
+    id: 'gemini-1.5-flash',
+    name: 'Gemini 1.5 Flash',
+    provider: 'gemini',
+    description: 'Faster version of Gemini with good performance.',
+    isFree: true,
+    maxTokens: 1048576,
+    capabilities: ['chat', 'analysis', 'coding'],
+    recommendedFor: ['Development', 'Quick Analysis'],
+    speed: 'fast',
+    quality: 'good'
+  },
+  {
+    id: 'anthropic/claude-3.5-sonnet',
+    name: 'Claude 3.5 Sonnet',
+    provider: 'openrouter',
+    description: 'Anthropic\'s most capable model, excellent for code and complex reasoning.',
+    isFree: false,
+    costPer1MTokens: 3.00,
+    maxTokens: 200000,
+    capabilities: ['chat', 'analysis', 'coding', 'reasoning', 'long-context'],
+    recommendedFor: ['Production', 'Complex Projects', 'Code Analysis'],
+    speed: 'medium',
+    quality: 'excellent'
+  }
+];
+
+const FALLBACK_PREFERENCES: UserAIPreferences = {
+  preferred_model: 'openai/gpt-3.5-turbo',
+  provider_preference: 'auto',
+  subscription_tier: 'free'
+};
+
 const AIModelSelector: React.FC<AIModelSelectorProps> = ({ 
   isOpen, 
   onClose, 
@@ -19,41 +98,114 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
 }) => {
   const [models, setModels] = useState<AIModel[]>([]);
   const [userPreferences, setUserPreferences] = useState<UserAIPreferences | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>('');
-  const [selectedProvider, setSelectedProvider] = useState<'openrouter' | 'gemini' | 'auto'>('auto');
+  const [selectedProvider, setSelectedProvider] = useState<string>('auto');
   const [filter, setFilter] = useState<'all' | 'free' | 'premium'>('all');
+  const [loading, setLoading] = useState<boolean>(false);
+  const [saving, setSaving] = useState<boolean>(false);
   const [testingModel, setTestingModel] = useState<string | null>(null);
+  const [isLocalMode, setIsLocalMode] = useState<boolean>(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState<boolean>(false);
 
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !hasLoadedOnce) {
       loadModels();
     }
-  }, [isOpen]);
+  }, [isOpen, hasLoadedOnce]);
 
   const loadModels = async () => {
+    if (loading || isGloballyLoading) return; // Prevent concurrent calls
+    
+    // Use cached data if available
+    if (globalModelsCache) {
+      setModels(globalModelsCache.models);
+      setUserPreferences(globalModelsCache.userPreferences);
+      setSelectedModel(globalModelsCache.userPreferences.preferred_model || '');
+      setSelectedProvider(globalModelsCache.userPreferences.provider_preference || 'auto');
+      setIsLocalMode(globalModelsCache.isLocalMode);
+      setHasLoadedOnce(true);
+      return;
+    }
+    
     try {
       setLoading(true);
+      isGloballyLoading = true;
       const response: ModelsResponse = await aiModelService.getAvailableModels();
+      
+      // Cache the successful response
+      globalModelsCache = {
+        models: response.models,
+        userPreferences: response.user_preferences,
+        isLocalMode: false
+      };
+      
       setModels(response.models);
       setUserPreferences(response.user_preferences);
       setSelectedModel(response.user_preferences.preferred_model || '');
       setSelectedProvider(response.user_preferences.provider_preference || 'auto');
+      setIsLocalMode(false);
+      setHasLoadedOnce(true);
     } catch (error) {
-      console.error('Failed to load models:', error);
+      console.warn('Backend AI models API not available, using fallback models for local mode:', error);
+      
+      // Use fallback data for local/development mode
+      const fallbackData = {
+        models: FALLBACK_MODELS,
+        userPreferences: FALLBACK_PREFERENCES,
+        isLocalMode: true
+      };
+      
+      // Try to load preferences from localStorage
+      const savedPreferences = localStorage.getItem('cognicraft_ai_preferences');
+      let preferences = FALLBACK_PREFERENCES;
+      
+      if (savedPreferences) {
+        try {
+          preferences = { ...FALLBACK_PREFERENCES, ...JSON.parse(savedPreferences) };
+          fallbackData.userPreferences = preferences;
+        } catch (e) {
+          console.warn('Failed to parse saved AI preferences, using defaults');
+        }
+      }
+      
+      // Cache the fallback response
+      globalModelsCache = fallbackData;
+      
+      setModels(fallbackData.models);
+      setUserPreferences(fallbackData.userPreferences);
+      setSelectedModel(preferences.preferred_model || 'openai/gpt-3.5-turbo');
+      setSelectedProvider(preferences.provider_preference || 'auto');
+      setIsLocalMode(true);
+      setHasLoadedOnce(true);
     } finally {
       setLoading(false);
+      isGloballyLoading = false;
     }
   };
 
   const handleSave = async () => {
     try {
       setSaving(true);
-      await aiModelService.updatePreferences({
-        preferred_ai_model: selectedModel,
-        ai_provider_preference: selectedProvider
-      });
+      
+      if (isLocalMode) {
+        // Save to localStorage in local mode
+        const preferences: UserAIPreferences = {
+          preferred_model: selectedModel,
+          provider_preference: selectedProvider,
+          subscription_tier: 'free' // Default to free in local mode
+        };
+        
+        localStorage.setItem('cognicraft_ai_preferences', JSON.stringify(preferences));
+        setUserPreferences(preferences);
+        
+        console.log('[Local Mode] AI preferences saved to localStorage:', preferences);
+      } else {
+        // Save via backend API when authenticated
+        await aiModelService.updatePreferences({
+          preferred_ai_model: selectedModel,
+          ai_provider_preference: selectedProvider
+        });
+      }
       
       if (onModelChanged) {
         onModelChanged(selectedModel);
@@ -71,11 +223,18 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
   const handleTestModel = async (modelId: string) => {
     try {
       setTestingModel(modelId);
-      const success = await aiModelService.testModel(modelId);
-      if (success) {
-        alert('Model test successful!');
+      
+      if (isLocalMode) {
+        // Simulate test in local mode
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        alert('Model test simulated successfully! (Local mode)');
       } else {
-        alert('Model test failed. Please try a different model.');
+        const success = await aiModelService.testModel(modelId);
+        if (success) {
+          alert('Model test successful!');
+        } else {
+          alert('Model test failed. Please try a different model.');
+        }
       }
     } catch (error) {
       console.error('Model test failed:', error);
@@ -123,6 +282,11 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
             <h2 className="text-2xl font-bold text-gray-900">AI Model Selection</h2>
             <p className="text-gray-600 mt-1">
               Choose your preferred AI model for project analysis and planning
+              {isLocalMode && (
+                <span className="ml-2 text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded">
+                  Local Mode
+                </span>
+              )}
             </p>
           </div>
           <button
@@ -141,6 +305,17 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
             </div>
           ) : (
             <>
+              {/* Local Mode Notice */}
+              {isLocalMode && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+                  <h3 className="font-medium text-yellow-900 mb-2">🔧 Development Mode</h3>
+                  <p className="text-yellow-800 text-sm">
+                    Running in local mode. AI model preferences will be saved locally. 
+                    Sign in to sync preferences across devices and access the full backend features.
+                  </p>
+                </div>
+              )}
+
               {/* Current Preferences */}
               {userPreferences && (
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
@@ -175,7 +350,7 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
                 </label>
                 <select
                   value={selectedProvider}
-                  onChange={(e) => setSelectedProvider(e.target.value as any)}
+                  onChange={(e) => setSelectedProvider(e.target.value)}
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="auto">Auto (Best Available)</option>
@@ -225,7 +400,7 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
               </div>
 
               {/* Model List */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 {filteredModels.map((model) => (
                   <div
                     key={model.id}
@@ -257,7 +432,7 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
                         
                         <p className="text-gray-600 text-sm mb-3">{model.description}</p>
                         
-                        <div className="flex items-center gap-4 text-xs">
+                        <div className="flex items-center gap-3 text-xs mb-2">
                           <span className={`px-2 py-1 rounded ${getSpeedColor(model.speed)}`}>
                             {model.speed} speed
                           </span>
@@ -306,12 +481,15 @@ const AIModelSelector: React.FC<AIModelSelectorProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t bg-gray-50">
+        <div className="flex items-center justify-between p-6 border-t bg-gray-50">
           <div className="text-sm text-gray-600">
-            {userPreferences?.subscription_tier === 'free' && (
+            {userPreferences?.subscription_tier === 'free' && !isLocalMode && (
               <span>Free plan: Limited to free models. 
                 <a href="#" className="text-blue-600 hover:underline ml-1">Upgrade to Pro</a>
               </span>
+            )}
+            {isLocalMode && (
+              <span>Local mode: All models available for testing</span>
             )}
           </div>
           <div className="flex items-center gap-3">

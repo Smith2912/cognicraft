@@ -27,6 +27,12 @@ import ContextMenu from './components/ContextMenu';
 
 const generateId = (prefix: string = 'id'): string => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
+// Convert BackendUser to LegacyUser format for compatibility
+const convertBackendUserToLegacy = (backendUser: BackendUser): LegacyUser => ({
+  username: backendUser.username,
+  avatarUrl: `https://github.com/${backendUser.username}.png`
+});
+
 interface HistoryState {
   nodes: NodeData[];
   edges: EdgeData[];
@@ -44,7 +50,7 @@ interface ContextMenuState {
 const App: React.FC = () => {
   // Backend integration state
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [currentUser, setCurrentUser] = useState<BackendUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<LegacyUser | null>(null);
   const [backendProjects, setBackendProjects] = useState<BackendProject[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [migrationStatus, setMigrationStatus] = useState<MigrationStatus | null>(null);
@@ -76,6 +82,245 @@ const App: React.FC = () => {
   const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
   const [contextMenuState, setContextMenuState] = useState<ContextMenuState | null>(null);
 
+  // State for tracking processed AI messages to prevent duplicate action processing
+  const [processedAiMessageIds, setProcessedAiMessageIds] = useState<Set<string>>(new Set());
+  const [recentlyCreatedNodes, setRecentlyCreatedNodes] = useState<Map<string, number>>(new Map());
+
+  // Reset processed messages when switching projects
+  useEffect(() => {
+    setProcessedAiMessageIds(new Set());
+    setRecentlyCreatedNodes(new Map());
+  }, [currentProjectId]);
+
+  // Clean up old node creation timestamps every 30 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setRecentlyCreatedNodes(prev => {
+        const updated = new Map(prev);
+        for (const [title, timestamp] of updated.entries()) {
+          if (now - timestamp > 30000) { // Remove entries older than 30 seconds
+            updated.delete(title);
+          }
+        }
+        return updated;
+      });
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Initialize authentication and online status
+  useEffect(() => {
+    let isMounted = true;
+
+    const initializeApp = async () => {
+      console.log('[App] Initializing application...');
+      
+      try {
+        // Check authentication status
+        const isUserAuthenticated = await authService.isAuthenticated();
+        
+        if (isMounted) {
+          setIsAuthenticated(isUserAuthenticated);
+          
+          if (isUserAuthenticated) {
+            // Load user data
+            const userData = await authService.getCurrentUser();
+            if (userData && isMounted) {
+              setCurrentUser(convertBackendUserToLegacy(userData));
+              console.log('[App] User authenticated:', userData.username);
+              
+              // Load backend projects
+              try {
+                const projects = await projectService.getProjects();
+                if (isMounted) {
+                  setBackendProjects(projects);
+                  console.log('[App] Loaded', projects.length, 'backend projects');
+                }
+              } catch (error) {
+                console.error('[App] Failed to load backend projects:', error);
+              }
+            }
+          } else {
+            console.log('[App] User not authenticated - running in local mode');
+          }
+          
+          setIsLoading(false);
+        }
+      } catch (error) {
+        console.error('[App] Authentication check failed:', error);
+        if (isMounted) {
+          setIsAuthenticated(false);
+          setIsLoading(false);
+        }
+      }
+    };
+
+    // Handle online/offline status
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    initializeApp();
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Load project data with backend integration
+  const loadProjectData = useCallback(async (projectId: string) => {
+    console.log(`[App] Loading data for project: ${projectId}`);
+    
+    try {
+      if (isAuthenticated && isOnline) {
+        // Try to load from backend first
+        try {
+          const backendProject = backendProjects.find(p => p.id === projectId);
+          if (backendProject) {
+            console.log('[App] Loading project data from backend');
+            // Load project nodes and edges from backend
+            // For now, fall back to localStorage while we implement this
+            // TODO: Implement backend project data loading
+          }
+        } catch (error) {
+          console.warn('[App] Failed to load from backend, falling back to localStorage:', error);
+        }
+      }
+      
+      // Load from localStorage (current implementation)
+      const nodesKey = getProjectScopedKey('plannerNodes', projectId);
+      const edgesKey = getProjectScopedKey('plannerEdges', projectId);
+      const chatKey = getProjectScopedKey('plannerChatMessages', projectId);
+      const selectedNodesKey = getProjectScopedKey('plannerSelectedNodeIds', projectId);
+      const selectedEdgeKey = getProjectScopedKey('plannerSelectedEdgeId', projectId);
+      const historyKey = getProjectScopedKey('plannerHistory', projectId);
+      const historyIndexKey = getProjectScopedKey('plannerHistoryIndex', projectId);
+
+      const initialNodes: NodeData[] = nodesKey && localStorage.getItem(nodesKey) ? JSON.parse(localStorage.getItem(nodesKey)!).map((node: NodeData) => ({
+          ...node,
+          width: node.width || NODE_WIDTH,
+          height: node.height || NODE_HEIGHT,
+          tags: Array.isArray(node.tags) ? node.tags : [],
+          iconId: node.iconId || 'github', 
+          githubIssueUrl: node.githubIssueUrl || undefined, 
+      })) : [];
+      const initialEdges: EdgeData[] = edgesKey && localStorage.getItem(edgesKey) ? JSON.parse(localStorage.getItem(edgesKey)!) : [];
+      const initialSelectedNodes: string[] = selectedNodesKey && localStorage.getItem(selectedNodesKey) ? JSON.parse(localStorage.getItem(selectedNodesKey)!) : [];
+      const initialSelectedEdge: string | null = selectedEdgeKey && localStorage.getItem(selectedEdgeKey) ? JSON.parse(localStorage.getItem(selectedEdgeKey)!) : null;
+      const initialChat: ChatMessage[] = chatKey && localStorage.getItem(chatKey) ? JSON.parse(localStorage.getItem(chatKey)!) : [{
+          id: generateId('ai-greet'), sender: 'ai',
+          text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
+          timestamp: Date.now()
+      }];
+      
+      const loadedHistory: HistoryState[] = historyKey && localStorage.getItem(historyKey) ? JSON.parse(localStorage.getItem(historyKey)!) : [];
+      let initialHistory: HistoryState[];
+      let initialHistoryIndex: number;
+
+      if (loadedHistory.length > 0) {
+          initialHistory = loadedHistory;
+          initialHistoryIndex = historyIndexKey && localStorage.getItem(historyIndexKey) ? parseInt(localStorage.getItem(historyIndexKey)!, 10) : initialHistory.length -1;
+          if (initialHistoryIndex < 0 || initialHistoryIndex >= initialHistory.length) {
+               initialHistoryIndex = initialHistory.length - 1;
+          }
+      } else {
+          initialHistory = [{ nodes: initialNodes, edges: initialEdges, selectedNodeIds: initialSelectedNodes, selectedEdgeId: initialSelectedEdge }];
+          initialHistoryIndex = 0;
+      }
+      
+      setNodesInternal(initialNodes);
+      setEdgesInternal(initialEdges);
+      setSelectedNodeIdsInternal(initialSelectedNodes);
+      setSelectedEdgeIdInternal(initialSelectedEdge);
+      setChatMessages(initialChat.map(m => ({...m, isProcessing: false})));
+      setHistory(initialHistory);
+      historyIndexRef.current = initialHistoryIndex;
+      setHistoryIndex(initialHistoryIndex);
+      setConnectingInfo(null); 
+      if (canvasRef.current) canvasRef.current.fitView(initialNodes);
+
+    } catch (error) {
+      console.error('[App] Failed to load project data:', error);
+      // Initialize with empty state on error
+      const initialHistory = [{ nodes: [], edges: [], selectedNodeIds: [], selectedEdgeId: null }];
+      setNodesInternal([]);
+      setEdgesInternal([]);
+      setSelectedNodeIdsInternal([]);
+      setSelectedEdgeIdInternal(null);
+      setChatMessages([{
+        id: generateId('ai-greet'), sender: 'ai',
+        text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
+        timestamp: Date.now()
+      }]);
+      setHistory(initialHistory);
+      historyIndexRef.current = 0;
+      setHistoryIndex(0);
+      setConnectingInfo(null);
+    }
+     }, [isAuthenticated, isOnline, backendProjects]);
+
+  // Initialize projects (after authentication is determined)
+  useEffect(() => {
+    if (isLoading) return; // Wait for auth to complete
+    
+    const initializeProjects = () => {
+      console.log('[App] Initializing projects...');
+      
+      // Load legacy localStorage projects for backward compatibility
+      const savedProjects = localStorage.getItem('plannerProjects');
+      const savedCurrentProjectId = localStorage.getItem('plannerCurrentProjectId');
+
+      let loadedProjects: LegacyProject[] = [];
+      if (savedProjects) {
+        try { 
+          loadedProjects = JSON.parse(savedProjects).map((p: LegacyProject) => ({
+            ...p,
+            githubRepoUrl: p.githubRepoUrl || '',
+            teamMemberUsernames: Array.isArray(p.teamMemberUsernames) ? p.teamMemberUsernames : []
+          })); 
+        } catch(e) { 
+          console.error("Failed to parse projects", e); 
+        }
+      }
+      setProjects(loadedProjects);
+
+      // Determine active project
+      let activeProjectId = savedCurrentProjectId;
+      if (loadedProjects.length > 0) {
+        if (!activeProjectId || !loadedProjects.find(p => p.id === activeProjectId)) {
+          console.log("[App Init] No valid current project ID found, defaulting to first project.");
+          activeProjectId = loadedProjects[0].id; 
+        }
+      } else { 
+        console.log("[App Init] No projects found, creating default project.");
+        const defaultProjectName = "Default Project";
+        const newProject: LegacyProject = {
+          id: generateId('project'),
+          name: defaultProjectName,
+          ownerUsername: currentUser?.username || 'local',
+          createdAt: Date.now(),
+          githubRepoUrl: '',
+          teamMemberUsernames: [],
+        };
+        setProjects([newProject]);
+        activeProjectId = newProject.id;
+      }
+      
+      console.log(`[App Init] Setting current project ID to: ${activeProjectId}`);
+      setCurrentProjectId(activeProjectId);
+      if(activeProjectId) {
+        loadProjectData(activeProjectId);
+      }
+    };
+
+    initializeProjects();
+  }, [isLoading, currentUser?.username, loadProjectData]);
 
   const getProjectScopedKey = (baseKey: string, projectId?: string | null) => {
     const pid = projectId || currentProjectId;
@@ -83,133 +328,38 @@ const App: React.FC = () => {
     return `${baseKey}_${pid}`;
   };
 
-  const loadProjectData = useCallback((projectId: string) => {
-    console.log(`[App] Loading data for project: ${projectId}`);
-    const nodesKey = getProjectScopedKey('plannerNodes', projectId);
-    const edgesKey = getProjectScopedKey('plannerEdges', projectId);
-    const chatKey = getProjectScopedKey('plannerChatMessages', projectId);
-    const selectedNodesKey = getProjectScopedKey('plannerSelectedNodeIds', projectId);
-    const selectedEdgeKey = getProjectScopedKey('plannerSelectedEdgeId', projectId);
-    const historyKey = getProjectScopedKey('plannerHistory', projectId);
-    const historyIndexKey = getProjectScopedKey('plannerHistoryIndex', projectId);
-
-    const initialNodes: NodeData[] = nodesKey && localStorage.getItem(nodesKey) ? JSON.parse(localStorage.getItem(nodesKey)!).map((node: NodeData) => ({
-        ...node,
-        width: node.width || NODE_WIDTH,
-        height: node.height || NODE_HEIGHT,
-        tags: Array.isArray(node.tags) ? node.tags : [],
-        iconId: node.iconId || 'github', 
-        githubIssueUrl: node.githubIssueUrl || undefined, 
-    })) : [];
-    const initialEdges: EdgeData[] = edgesKey && localStorage.getItem(edgesKey) ? JSON.parse(localStorage.getItem(edgesKey)!) : [];
-    const initialSelectedNodes: string[] = selectedNodesKey && localStorage.getItem(selectedNodesKey) ? JSON.parse(localStorage.getItem(selectedNodesKey)!) : [];
-    const initialSelectedEdge: string | null = selectedEdgeKey && localStorage.getItem(selectedEdgeKey) ? JSON.parse(localStorage.getItem(selectedEdgeKey)!) : null;
-    const initialChat: ChatMessage[] = chatKey && localStorage.getItem(chatKey) ? JSON.parse(localStorage.getItem(chatKey)!) : [{
-        id: generateId('ai-greet'), sender: 'ai',
-        text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
-        timestamp: Date.now()
-    }];
-    
-    const loadedHistory: HistoryState[] = historyKey && localStorage.getItem(historyKey) ? JSON.parse(localStorage.getItem(historyKey)!) : [];
-    let initialHistory: HistoryState[];
-    let initialHistoryIndex: number;
-
-    if (loadedHistory.length > 0) {
-        initialHistory = loadedHistory;
-        initialHistoryIndex = historyIndexKey && localStorage.getItem(historyIndexKey) ? parseInt(localStorage.getItem(historyIndexKey)!, 10) : initialHistory.length -1;
-        if (initialHistoryIndex < 0 || initialHistoryIndex >= initialHistory.length) {
-             initialHistoryIndex = initialHistory.length - 1;
-        }
-    } else {
-        initialHistory = [{ nodes: initialNodes, edges: initialEdges, selectedNodeIds: initialSelectedNodes, selectedEdgeId: initialSelectedEdge }];
-        initialHistoryIndex = 0;
-    }
-    
-    setNodesInternal(initialNodes);
-    setEdgesInternal(initialEdges);
-    setSelectedNodeIdsInternal(initialSelectedNodes);
-    setSelectedEdgeIdInternal(initialSelectedEdge);
-    setChatMessages(initialChat.map(m => ({...m, isProcessing: false})));
-    setHistory(initialHistory);
-    historyIndexRef.current = initialHistoryIndex;
-    setHistoryIndex(initialHistoryIndex);
-    setConnectingInfo(null); 
-    if (canvasRef.current) canvasRef.current.fitView(initialNodes);
-
-  }, []);
-
-
+    // Auto-save project data with backend integration
   useEffect(() => {
-    const savedProjects = localStorage.getItem('plannerProjects');
-    const savedCurrentProjectId = localStorage.getItem('plannerCurrentProjectId');
-    const savedUser = localStorage.getItem('plannerUser');
-
-    let loadedProjects: Project[] = [];
-    if (savedProjects) {
-        try { loadedProjects = JSON.parse(savedProjects).map((p: Project) => ({
-            ...p,
-            githubRepoUrl: p.githubRepoUrl || '',
-            teamMemberUsernames: Array.isArray(p.teamMemberUsernames) ? p.teamMemberUsernames : []
-        })); }
-        catch(e) { console.error("Failed to parse projects", e); }
-    }
-    setProjects(loadedProjects);
-
-    if (savedUser) {
-      try { setCurrentUser(JSON.parse(savedUser)); } 
-      catch (e) { console.error("Failed to parse saved user:", e); }
-    }
+    if (!currentProjectId) return;
     
-    let activeProjectId = savedCurrentProjectId;
-    if (loadedProjects.length > 0) {
-        if (!activeProjectId || !loadedProjects.find(p => p.id === activeProjectId)) {
-            console.log("[App Init] No valid current project ID found, defaulting to first project.");
-            activeProjectId = loadedProjects[0].id; 
+    const saveProjectData = async () => {
+      try {
+        // Save to localStorage (immediate backup)
+        localStorage.setItem(getProjectScopedKey('plannerNodes')!, JSON.stringify(nodes));
+        
+        // If authenticated and online, also save to backend
+        if (isAuthenticated && isOnline && backendProjects.find(p => p.id === currentProjectId)) {
+          // TODO: Implement backend project data saving
+          console.log('[App] TODO: Save nodes to backend for project:', currentProjectId);
         }
-    } else { 
-        console.log("[App Init] No projects found, creating default project.");
-        const defaultProjectName = "Default Project";
-        const newProject: Project = {
-            id: generateId('project'),
-            name: defaultProjectName,
-            ownerUsername: currentUser?.username || 'local',
-            createdAt: Date.now(),
-            githubRepoUrl: '',
-            teamMemberUsernames: [],
-        };
-        setProjects([newProject]);
-        activeProjectId = newProject.id;
-    }
+      } catch (error) {
+        console.error('[App] Failed to save nodes:', error);
+      }
+    };
     
-    console.log(`[App Init] Setting current project ID to: ${activeProjectId}`);
-    setCurrentProjectId(activeProjectId);
-    if(activeProjectId) {
-        loadProjectData(activeProjectId);
-    } else if (loadedProjects.length === 0) { 
-        // This case should ideally be handled by the default project creation logic above.
-        // If `activeProjectId` is still null here, it implies an issue in the logic.
-        console.warn("[App Init] activeProjectId is null after initial setup logic. Attempting to find/load default project again.");
-        const defaultProject = projects.find(p => p.name === "Default Project"); 
-        if (defaultProject) {
-             loadProjectData(defaultProject.id);
-        } else {
-            console.error("[App Init] Could not load or create a default project. Canvas might be unresponsive.");
-        }
-    }
+    saveProjectData();
+  }, [nodes, currentProjectId, isAuthenticated, isOnline, backendProjects]);
 
-  }, [loadProjectData, currentUser?.username]); 
-
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerNodes')!, JSON.stringify(nodes)); }, [nodes, currentProjectId]);
   useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerEdges')!, JSON.stringify(edges)); }, [edges, currentProjectId]);
   useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerChatMessages')!, JSON.stringify(chatMessages)); }, [chatMessages, currentProjectId]);
   useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerSelectedNodeIds')!, JSON.stringify(selectedNodeIds)); }, [selectedNodeIds, currentProjectId]);
   useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerSelectedEdgeId')!, JSON.stringify(selectedEdgeId)); }, [selectedEdgeId, currentProjectId]);
   useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerHistory')!, JSON.stringify(history)); }, [history, currentProjectId]);
   useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerHistoryIndex')!, historyIndex.toString()); }, [historyIndex, currentProjectId]);
-  
+
   useEffect(() => { localStorage.setItem('plannerProjects', JSON.stringify(projects)); }, [projects]);
   useEffect(() => { if (currentProjectId) localStorage.setItem('plannerCurrentProjectId', currentProjectId);}, [currentProjectId]);
-  useEffect(() => { localStorage.setItem('plannerUser', JSON.stringify(currentUser)); }, [currentUser]);
+  useEffect(() => { currentUser && localStorage.setItem('plannerUser', JSON.stringify(currentUser)); }, [currentUser]);
 
 
   const pushCurrentStateToHistory = useCallback(() => {
@@ -327,38 +477,30 @@ const App: React.FC = () => {
     const newNode: NodeData = {
       id: generateId('node'),
       x, y,
-      title: 'New Task',
-      description: 'Describe your task here...',
+      title: 'New Node',
+      description: 'Enter description...',
       status: NodeStatus.ToDo,
       width: NODE_WIDTH,
       height: NODE_HEIGHT,
       tags: [],
-      iconId: 'github', 
-      githubIssueUrl: undefined, 
+      iconId: 'github'
     };
     setNodesInternal(prev => [...prev, newNode]);
-    setSelectedNodeIdsInternal([newNode.id]); 
-    setSelectedEdgeIdInternal(null); 
-    setHistoryTrigger(c => c + 1); 
+    setSelectedNodeIdsInternal([newNode.id]);
+    setSelectedEdgeIdInternal(null);
+    setHistoryTrigger(c => c + 1);
   }, [calculateNewNodePosition, currentProjectId]);
 
   const handleClearCanvas = useCallback(() => {
     if (!currentProjectId) return;
-    if (window.confirm("Are you sure you want to clear the entire canvas for the current project? This will remove all nodes and edges.")) {
-        setNodesInternal([]);
-        setEdgesInternal([]);
-        setSelectedNodeIdsInternal([]);
-        setSelectedEdgeIdInternal(null);
-        setConnectingInfo(null); 
-        setChatMessages(prev => [...prev, {
-            id: generateId('system'),
-            sender: 'ai',
-            text: "Canvas cleared for current project.",
-            timestamp: Date.now()
-        }]);
-        setHistoryTrigger(c => c + 1); 
+    if (window.confirm('Are you sure you want to clear the entire canvas? This action cannot be undone.')) {
+      setNodesInternal([]);
+      setEdgesInternal([]);
+      setSelectedNodeIdsInternal([]);
+      setSelectedEdgeIdInternal(null);
+      setHistoryTrigger(c => c + 1);
     }
-  }, [setChatMessages, currentProjectId]); 
+  }, [currentProjectId]);
 
   const handleAddNodeFromAI = useCallback((title: string, description: string, projectId: string, status: NodeStatus = NodeStatus.ToDo, tags: string[] = [], iconId: string = 'github', githubIssueUrl?: string): NodeData | null => {
     console.log("[handleAddNodeFromAI] Called with projectId:", projectId, "Title:", title);
@@ -366,6 +508,22 @@ const App: React.FC = () => {
       console.error("[handleAddNodeFromAI] Aborting: Null or invalid projectId provided:", projectId);
       return null;
     }
+
+    // Check if a node with the same title was recently created (within 30 seconds)
+    const now = Date.now();
+    const recentTimestamp = recentlyCreatedNodes.get(title.toLowerCase());
+    if (recentTimestamp && (now - recentTimestamp) < 30000) {
+      console.warn("[handleAddNodeFromAI] Duplicate node creation prevented for title:", title, "Recent timestamp:", recentTimestamp);
+      return null;
+    }
+
+    // Check if a node with the same title already exists
+    const existingNode = nodes.find(node => node.title.toLowerCase() === title.toLowerCase());
+    if (existingNode) {
+      console.warn("[handleAddNodeFromAI] Node with same title already exists:", title, "Existing node ID:", existingNode.id);
+      return existingNode; // Return existing node instead of creating duplicate
+    }
+
     const { x, y } = calculateNewNodePosition(); 
     const newNode: NodeData = {
       id: generateId('node'), x, y, title, description, status,
@@ -373,29 +531,36 @@ const App: React.FC = () => {
       githubIssueUrl: githubIssueUrl || undefined, 
     };
     console.log("[handleAddNodeFromAI] Creating node:", newNode.id, "for project:", projectId);
+    
+    // Track this node creation
+    setRecentlyCreatedNodes(prev => new Map([...prev, [title.toLowerCase(), now]]));
+    
     setNodesInternal(prev => [...prev, newNode]);
     setSelectedNodeIdsInternal([newNode.id]); 
     setSelectedEdgeIdInternal(null); 
     // Note: history trigger is typically called by the caller (processAiResponseForAction) after all parts of an AI action are done.
     return newNode;
-  }, [calculateNewNodePosition]); 
+  }, [calculateNewNodePosition, recentlyCreatedNodes, nodes]);
 
   const handleUpdateNode = useCallback((updatedNode: NodeData) => {
-    if (!currentProjectId) return; 
-    setNodesInternal(prev => prev.map(n => (n.id === updatedNode.id ? { ...updatedNode, tags: updatedNode.tags || [], iconId: updatedNode.iconId || 'github', githubIssueUrl: updatedNode.githubIssueUrl || undefined } : n)));
-    setHistoryTrigger(c => c + 1); 
+    if (!currentProjectId) return;
+    setNodesInternal(prev => 
+      prev.map(node => node.id === updatedNode.id ? updatedNode : node)
+    );
+    setHistoryTrigger(c => c + 1);
   }, [currentProjectId]);
 
   const handleDeleteNode = useCallback((nodeId: string) => {
-    if (!currentProjectId) return; 
-    setNodesInternal(prev => prev.filter(n => n.id !== nodeId));
-    setEdgesInternal(prev => prev.filter(edge => edge.sourceId !== nodeId && edge.targetId !== nodeId));
-    setSelectedNodeIdsInternal(prev => prev.filter(id => id !== nodeId)); 
-    if(connectingInfo && (connectingInfo.sourceId === nodeId)){
-        setConnectingInfo(null);
+    if (!currentProjectId) return;
+    if (window.confirm('Are you sure you want to delete this node?')) {
+      setNodesInternal(prev => prev.filter(node => node.id !== nodeId));
+      setEdgesInternal(prev => prev.filter(edge => 
+        edge.sourceId !== nodeId && edge.targetId !== nodeId
+      ));
+      setSelectedNodeIdsInternal(prev => prev.filter(id => id !== nodeId));
+      setHistoryTrigger(c => c + 1);
     }
-    setHistoryTrigger(c => c + 1); 
-  }, [connectingInfo, currentProjectId]); 
+  }, [currentProjectId]);
   
   const handleAddSubtaskNode = useCallback((
     parentNodeId: string, 
@@ -406,447 +571,346 @@ const App: React.FC = () => {
     subtaskIconId: string = 'github', 
     subtaskGithubIssueUrl?: string
   ): NodeData | null => {
-    console.log("[handleAddSubtaskNode] Called for parentNodeId:", parentNodeId, "with projectId:", projectId, "Title:", subtaskTitle);
+    console.log("[handleAddSubtaskNode] Called with parentId:", parentNodeId, "Title:", subtaskTitle);
     if (!projectId) {
-        console.error("[handleAddSubtaskNode] Aborting: Null or invalid projectId provided:", projectId);
-        return null;
+      console.error("[handleAddSubtaskNode] Aborting: Null or invalid projectId provided:", projectId);
+      return null;
     }
-    const parentNode = nodes.find(n => n.id === parentNodeId); 
+
+    // Find the parent node to position subtask nearby
+    const parentNode = nodes.find(node => node.id === parentNodeId);
     if (!parentNode) {
-        console.error(`[handleAddSubtaskNode] Parent node ID "${parentNodeId}" not found.`);
-        setChatMessages(prev => [...prev, {
-            id: generateId('ai-error'), sender: 'ai',
-            text: `Parent node ID "${parentNodeId}" not found. Cannot create subtask.`,
-            timestamp: Date.now(), isError: true,
-        }]);
-        return null;
+      console.error("[handleAddSubtaskNode] Parent node not found:", parentNodeId);
+      return null;
     }
 
-    let targetNode: NodeData | null = null;
-    let edgeNeedsCreation = true;
-    let nodeWasReused = false;
+    // Position subtask to the right of parent node
+    const subtaskX = parentNode.x + NODE_WIDTH + 50;
+    const subtaskY = parentNode.y;
 
-    // Check if a node with the same title already exists (excluding the parent itself)
-    const existingNodeWithSameTitle = nodes.find(n => 
-        n.title.trim().toLowerCase() === subtaskTitle.trim().toLowerCase() && 
-        n.id !== parentNodeId
-    );
+    const newSubtaskNode: NodeData = {
+      id: generateId('subtask'),
+      x: subtaskX,
+      y: subtaskY,
+      title: subtaskTitle,
+      description: subtaskDescription || `Subtask of: ${parentNode.title}`,
+      status: NodeStatus.ToDo,
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+      tags: subtaskTags,
+      iconId: subtaskIconId || 'github',
+      githubIssueUrl: subtaskGithubIssueUrl || undefined,
+    };
 
-    if (existingNodeWithSameTitle) {
-        console.log(`[handleAddSubtaskNode] Found existing node with title "${subtaskTitle}" (ID: ${existingNodeWithSameTitle.id}). Reusing it.`);
-        targetNode = { ...existingNodeWithSameTitle }; // Work with a copy
-        nodeWasReused = true;
-        
-        const edgeExists = edges.some(e => e.sourceId === parentNodeId && e.targetId === targetNode!.id);
-        if (edgeExists) {
-            edgeNeedsCreation = false;
-            console.log(`[handleAddSubtaskNode] Edge from "${parentNode.title}" to "${targetNode.title}" already exists.`);
-        }
-        // Note: We are NOT updating the content (description, tags, icon) of the reused node here.
-        // That should be handled by an explicit update action from the AI if intended.
-        // We will only reposition it and ensure it's linked.
-    } else {
-        console.log(`[handleAddSubtaskNode] No existing node with title "${subtaskTitle}". Creating new one.`);
-        // Calculate position for a new node (or for a reused node that needs positioning)
-        const subtasksOfParentForPositioning = edges
-            .filter(e => e.sourceId === parentNodeId)
-            .map(e => nodes.find(n => n.id === e.targetId))
-            .filter(n => n !== undefined) as NodeData[];
-        
-        const { x, y } = calculateNewNodePosition(parentNode, subtasksOfParentForPositioning);
-
-        const newNode: NodeData = {
-          id: generateId('node'), x, y, title: subtaskTitle,
-          description: subtaskDescription || `Subtask of "${parentNode.title}"`,
-          status: NodeStatus.ToDo, 
-          width: NODE_WIDTH, height: NODE_HEIGHT, 
-          tags: subtaskTags, iconId: subtaskIconId || 'github',
-          githubIssueUrl: subtaskGithubIssueUrl || undefined, 
-        };
-        setNodesInternal(prev => [...prev, newNode]); 
-        targetNode = newNode;
-    }
-
-    if (!targetNode) {
-      console.error("[handleAddSubtaskNode] Target node is null, this should not happen.");
-      return null; 
-    }
-
-    // Reposition if it's a reused node and needs linking, or if it's a new node.
-    // The new node is already created with a calculated position.
-    // If reusing, we need to calculate its new position relative to the parent.
-    if (nodeWasReused) {
-        const subtasksOfParentForPositioning = edges
-            .filter(e => e.sourceId === parentNodeId)
-            .map(e => nodes.find(n => n.id === e.targetId))
-            .filter(n => n !== undefined && n.id !== targetNode!.id) as NodeData[]; 
-
-        const { x, y } = calculateNewNodePosition(parentNode, subtasksOfParentForPositioning);
-        
-        if (targetNode.x !== x || targetNode.y !== y) {
-            const positionedTargetNode = { ...targetNode, x, y };
-            setNodesInternal(prevNodes => prevNodes.map(n => n.id === positionedTargetNode.id ? positionedTargetNode : n));
-            targetNode = positionedTargetNode; 
-            console.log(`[handleAddSubtaskNode] Repositioned reused node "${targetNode.title}" to x:${x}, y:${y}.`);
-        }
-    }
+    console.log("[handleAddSubtaskNode] Creating subtask node:", newSubtaskNode.id, "for project:", projectId);
+    setNodesInternal(prev => [...prev, newSubtaskNode]);
     
-    if (edgeNeedsCreation) {
-        const newEdge: EdgeData = { 
-            id: generateId('edge'), sourceId: parentNodeId, targetId: targetNode.id,
-            sourceHandle: 'bottom', targetHandle: 'top'     
-        };
-        setEdgesInternal(prevEdges => [...prevEdges, newEdge]);
-        console.log(`[handleAddSubtaskNode] Created edge from "${parentNode.title}" to "${targetNode.title}".`);
-    }
+    // Create an edge from parent to subtask
+    const newEdge: EdgeData = {
+      id: generateId('edge'),
+      sourceId: parentNodeId,
+      targetId: newSubtaskNode.id,
+      sourceHandle: 'right',
+      targetHandle: 'left',
+    };
     
-    // Caller (processAiResponseForAction) will handle selection and history trigger.
-    return targetNode;
-  }, [nodes, edges, calculateNewNodePosition]); 
+    setEdgesInternal(prev => [...prev, newEdge]);
+    setSelectedNodeIdsInternal([newSubtaskNode.id]);
+    setSelectedEdgeIdInternal(null);
+    
+    return newSubtaskNode;
+  }, [nodes]);
 
-  const processAiResponseForAction = useCallback((aiFullText: string, projectIdForAction: string | null) => {
-    console.log("[processAiResponseForAction] Received AI text:", aiFullText.substring(0,100) + "...", "for project:", projectIdForAction);
+  const processAiResponseForAction = useCallback((aiFullText: string, projectIdForAction: string | null, messageId: string) => {
     if (!projectIdForAction) {
-        console.warn("[processAiResponseForAction] Aborting: No valid project ID for action (projectIdForAction is falsy).");
-        return false;
+      console.warn('[processAiResponseForAction] No project ID provided');
+      return false;
     }
-    
-    let jsonStringToParse: string | null = null;
-    const trimmedAiText = aiFullText.trim();
 
-    if (trimmedAiText.startsWith('{') && trimmedAiText.endsWith('}')) {
+    // Check if this message has already been processed
+    if (processedAiMessageIds.has(messageId)) {
+      console.log('[processAiResponseForAction] Message already processed, skipping:', messageId);
+      return false;
+    }
+
+    console.log('[processAiResponseForAction] Processing AI response for actions...');
+    
+    let actionsProcessed = false;
+    
+    try {
+      // Look for JSON action patterns in the AI response
+      // Pattern 1: Pure JSON object (most common from our system instruction)
+      const pureJsonMatch = aiFullText.match(/^\s*\{[^}]*"action"[^}]*\}$/m);
+      
+      // Pattern 2: JSON within markdown code blocks
+      const codeBlockMatches = aiFullText.match(/```json\s*([\s\S]*?)\s*```/g);
+      
+      // Pattern 3: JSON objects anywhere in the text
+      const jsonMatches = aiFullText.match(/\{[^}]*"action"[^}]*\}/g);
+      
+      const jsonCandidates: string[] = [];
+      const processedJsonStrings = new Set<string>(); // Prevent duplicate JSON processing
+      
+      if (pureJsonMatch) {
+        const jsonStr = pureJsonMatch[0].trim();
+        if (!processedJsonStrings.has(jsonStr)) {
+          jsonCandidates.push(jsonStr);
+          processedJsonStrings.add(jsonStr);
+        }
+      }
+      
+      if (codeBlockMatches) {
+        codeBlockMatches.forEach(match => {
+          const content = match.replace(/```json\s*/, '').replace(/\s*```/, '').trim();
+          if (!processedJsonStrings.has(content)) {
+            jsonCandidates.push(content);
+            processedJsonStrings.add(content);
+          }
+        });
+      }
+      
+      if (jsonMatches) {
+        jsonMatches.forEach(match => {
+          const jsonStr = match.trim();
+          if (!processedJsonStrings.has(jsonStr)) {
+            jsonCandidates.push(jsonStr);
+            processedJsonStrings.add(jsonStr);
+          }
+        });
+      }
+
+      // Process each unique JSON candidate
+      for (const jsonStr of jsonCandidates) {
         try {
-            JSON.parse(trimmedAiText); 
-            jsonStringToParse = trimmedAiText;
-            console.log("[processAiResponseForAction] Attempt 1: Parsed as direct JSON.");
-        } catch (e) {
-             console.log("[processAiResponseForAction] Attempt 1: Direct parse failed, trying fence. Error:", e);
-        }
-    }
-
-    if (!jsonStringToParse) {
-        const fenceRegex = /^```(?:json)?\s*\n?(.*?)\n?\s*```$/s;
-        const fenceMatch = trimmedAiText.match(fenceRegex);
-        if (fenceMatch && fenceMatch[1]) {
-            const fencedContent = fenceMatch[1].trim();
-            if (fencedContent.startsWith('{') && fencedContent.endsWith('}')) {
-                 try {
-                    JSON.parse(fencedContent); 
-                    jsonStringToParse = fencedContent;
-                    console.log("[processAiResponseForAction] Attempt 2: Extracted and parsed from fence.");
-                } catch (e) {
-                    console.warn("[processAiResponseForAction] Attempt 2: Content inside JSON fence was not valid JSON:", fencedContent, e);
-                }
-            } else {
-                 console.warn("[processAiResponseForAction] Attempt 2: Content inside JSON fence did not appear to be a JSON object:", fencedContent);
+          const actionData = JSON.parse(jsonStr);
+          
+          if (actionData.action === 'CREATE_NODE') {
+            console.log('[processAiResponseForAction] Processing CREATE_NODE action:', actionData);
+            
+            const newNode = handleAddNodeFromAI(
+              actionData.title || 'Untitled Node',
+              actionData.description || '',
+              projectIdForAction,
+              NodeStatus.ToDo,
+              actionData.tags || [],
+              actionData.iconId || 'github',
+              actionData.githubIssueUrl
+            );
+            
+            if (newNode) {
+              console.log('[processAiResponseForAction] Successfully created node:', newNode.id);
+              actionsProcessed = true;
             }
-        } else {
-            console.log("[processAiResponseForAction] Attempt 2: No markdown fence found or fence content invalid.");
+          } else if (actionData.action === 'CREATE_SUBTASKS') {
+            console.log('[processAiResponseForAction] Processing CREATE_SUBTASKS action:', actionData);
+            
+            // Find the parent node by title
+            const parentNode = nodes.find(node => 
+              node.title.toLowerCase() === actionData.parentNodeTitle?.toLowerCase()
+            );
+            
+            if (parentNode && actionData.subtasks) {
+              for (const subtask of actionData.subtasks) {
+                const subtaskNode = handleAddSubtaskNode(
+                  parentNode.id,
+                  subtask.title || 'Untitled Subtask',
+                  projectIdForAction,
+                  subtask.description || '',
+                  subtask.tags || [],
+                  subtask.iconId || 'github',
+                  subtask.githubIssueUrl
+                );
+                
+                if (subtaskNode) {
+                  console.log('[processAiResponseForAction] Successfully created subtask:', subtaskNode.id);
+                  actionsProcessed = true;
+                }
+              }
+            } else {
+              console.warn('[processAiResponseForAction] Parent node not found for subtasks:', actionData.parentNodeTitle);
+            }
+          }
+        } catch (parseError) {
+          console.warn('[processAiResponseForAction] Failed to parse JSON action:', parseError, 'JSON:', jsonStr);
         }
+      }
+      
+      // Trigger history update if any actions were processed
+      if (actionsProcessed) {
+        setHistoryTrigger(c => c + 1);
+        console.log('[processAiResponseForAction] Actions processed successfully, history updated');
+      }
+      
+      // Mark this message as processed regardless of whether actions were found
+      setProcessedAiMessageIds(prev => new Set([...prev, messageId]));
+      console.log('[processAiResponseForAction] Message marked as processed:', messageId);
+      
+    } catch (error) {
+      console.error('[processAiResponseForAction] Error processing AI response:', error);
     }
     
-    if (!jsonStringToParse) {
-        console.log("[processAiResponseForAction] Attempt 3: Falling back to indexOf '{\"action\":}'.");
-        const actionJsonStartIndex = trimmedAiText.indexOf('{"action":');
-        if (actionJsonStartIndex !== -1) {
-            let potentialJsonString = trimmedAiText.substring(actionJsonStartIndex);
-            let openBraces = 0;
-            let endIndex = -1;
-            for (let i = 0; i < potentialJsonString.length; i++) {
-                if (potentialJsonString[i] === '{') openBraces++;
-                else if (potentialJsonString[i] === '}') {
-                    openBraces--;
-                    if (openBraces === 0) { endIndex = i; break; }
-                }
-            }
-            if (endIndex !== -1) {
-                const extracted = potentialJsonString.substring(0, endIndex + 1);
-                try {
-                    JSON.parse(extracted); 
-                    jsonStringToParse = extracted;
-                    console.log("[processAiResponseForAction] Attempt 3: Extracted via brace balancing.");
-                } catch (e) {
-                     console.warn("[processAiResponseForAction] Attempt 3: Brace-balanced string not valid JSON.", e);
-                }
-            } else {
-                 console.warn("[processAiResponseForAction] Attempt 3: Brace balancing failed to find end of JSON.");
-            }
-        } else {
-             console.log("[processAiResponseForAction] Attempt 3: '{\"action\":' not found in text.");
-        }
-    }
+    return actionsProcessed;
+  }, [handleAddNodeFromAI, handleAddSubtaskNode, nodes, processedAiMessageIds]);
+
+  const handleSendChatMessage = useCallback(async (message: string) => {
+    if (!currentProjectId || !message.trim()) return;
     
-    let parsedAction: AiAction | null = null;
-    if (jsonStringToParse) {
-        try {
-            parsedAction = JSON.parse(jsonStringToParse) as AiAction;
-        } catch (e) {
-            console.error("[processAiResponseForAction] Final JSON.parse failed:", e, "\nAttempted to parse:", jsonStringToParse, "\nOriginal AI Response Text:", aiFullText);
-            setChatMessages(prev => [...prev, {
-                id: generateId('ai-parse-error'),
-                sender: 'ai',
-                text: "I tried to perform an action, but my instructions were not formatted correctly. Please check the console for details.",
-                timestamp: Date.now(),
-                isError: true,
-            }]);
-            return false; 
-        }
-    } else {
-        console.log("[processAiResponseForAction] No valid JSON string could be extracted after all attempts. Original AI Text:", aiFullText);
-        return false; 
-    }
+    const userMessage: ChatMessage = {
+      id: generateId('user-msg'),
+      sender: 'user',
+      text: message.trim(),
+      timestamp: Date.now()
+    };
 
-    if (parsedAction && parsedAction.action) {
-        console.log("[processAiResponseForAction] Successfully parsed action:", JSON.stringify(parsedAction), "for project:", projectIdForAction);
-        let actionTaken = false;
-        let newSelectedNodeIdForFocus: string | null = null;
-
-        switch (parsedAction.action) {
-            case 'CREATE_NODE':
-                const nodeAction = parsedAction as AiCreateNodeAction;
-                const existingNode = nodes.find(n => n.title.trim().toLowerCase() === nodeAction.title.trim().toLowerCase());
-
-                if (existingNode && nodeAction.description) {
-                    const updatedNodeData: NodeData = {
-                        ...existingNode,
-                        description: nodeAction.description,
-                        tags: nodeAction.tags || existingNode.tags,
-                        iconId: nodeAction.iconId || existingNode.iconId,
-                        githubIssueUrl: nodeAction.githubIssueUrl || existingNode.githubIssueUrl,
-                    };
-                    handleUpdateNode(updatedNodeData); // This will trigger history itself
-                    setChatMessages(prev => [...prev, {
-                        id: generateId('ai-confirm'), sender: 'ai',
-                        text: `Updated details for node: "${nodeAction.title}".`, timestamp: Date.now()
-                    }]);
-                    newSelectedNodeIdForFocus = existingNode.id;
-                    actionTaken = true;
-                } else {
-                    const createdNode = handleAddNodeFromAI(nodeAction.title, nodeAction.description, projectIdForAction, NodeStatus.ToDo, nodeAction.tags || [], nodeAction.iconId, nodeAction.githubIssueUrl);
-                    if (createdNode) {
-                        setChatMessages(prev => [...prev, {
-                            id: generateId('ai-confirm'), sender: 'ai',
-                            text: `Created node: "${nodeAction.title}".`, timestamp: Date.now()
-                        }]);
-                        newSelectedNodeIdForFocus = createdNode.id;
-                        setHistoryTrigger(c => c + 1); // Trigger history for new node creation
-                        actionTaken = true;
-                    } else {
-                        console.warn("[processAiResponseForAction] handleAddNodeFromAI returned null for CREATE_NODE (new).");
-                        setChatMessages(prev => [...prev, {
-                            id: generateId('ai-error-node'), sender: 'ai',
-                            text: `I tried to create a node titled "${nodeAction.title}", but it failed. Please ensure a project is active or check console for more details.`,
-                            timestamp: Date.now(), isError: true,
-                        }]);
-                        actionTaken = true; 
-                    }
-                }
-                break;
-            case 'CREATE_SUBTASKS':
-                const subtaskAction = parsedAction as AiCreateSubtasksAction;
-                const parentNodeByTitle = nodes.find(n => n.title.trim().toLowerCase() === subtaskAction.parentNodeTitle.trim().toLowerCase()); 
-                if (parentNodeByTitle) {
-                    let createdCount = 0;
-                    let lastCreatedSubtaskId: string | null = null;
-                    subtaskAction.subtasks.forEach(subtask => {
-                        const createdSubNode = handleAddSubtaskNode(parentNodeByTitle.id, subtask.title, projectIdForAction, subtask.description, subtask.tags || [], subtask.iconId, subtask.githubIssueUrl);
-                        if(createdSubNode) {
-                            createdCount++;
-                            lastCreatedSubtaskId = createdSubNode.id;
-                        }
-                    });
-                     if (createdCount > 0) {
-                         setChatMessages(prev => [...prev, {
-                            id: generateId('ai-confirm'), sender: 'ai',
-                            text: `Added ${createdCount} subtask(s) to "${parentNodeByTitle.title}".`, timestamp: Date.now()
-                        }]);
-                        newSelectedNodeIdForFocus = lastCreatedSubtaskId; // Focus on the last created/linked subtask
-                        setHistoryTrigger(c => c + 1); // Trigger history for subtask creation/linking
-                    } else {
-                         console.warn("[processAiResponseForAction] No subtasks actually created/linked for parent:", parentNodeByTitle.title);
-                    }
-                    actionTaken = true; 
-                } else {
-                    console.warn(`[processAiResponseForAction] Parent node titled "${subtaskAction.parentNodeTitle}" not found for CREATE_SUBTASKS.`);
-                    const existingNodeTitles = nodes.slice(0, 5).map(n => `"${n.title}"`).join(', ');
-                    let errorText = `I couldn't find a parent node titled "${subtaskAction.parentNodeTitle}".`;
-                    if (nodes.length > 0) {
-                        errorText += ` Existing tasks include: ${existingNodeTitles}${nodes.length > 5 ? '...' : ''}.`;
-                        errorText += ` Please confirm the correct parent title, or ask me to create the parent task first.`
-                    } else {
-                        errorText += ` There are no tasks on the board yet. Please ask me to create the parent task first.`
-                    }
-                    setChatMessages(prev => [...prev, {
-                        id: generateId('ai-error-subtask'), sender: 'ai',
-                        text: errorText,
-                        timestamp: Date.now(), isError: true,
-                    }]);
-                    actionTaken = true; 
-                }
-                break;
-            default:
-                console.warn("[processAiResponseForAction] Unknown action type:", (parsedAction as any).action);
-        }
-        
-        if (newSelectedNodeIdForFocus) {
-            setSelectedNodeIdsInternal([newSelectedNodeIdForFocus]);
-            setSelectedEdgeIdInternal(null);
-        }
-
-        console.log("[processAiResponseForAction] Action taken status:", actionTaken);
-        if (actionTaken && canvasRef.current) {
-            setTimeout(() => {
-                if (canvasRef.current) {
-                    canvasRef.current.fitView();
-                }
-            }, 0);
-        }
-        return actionTaken;
-    }
-    console.log("[processAiResponseForAction] No valid action parsed or projectIdForAction missing. projectIdForAction:", projectIdForAction, "Parsed action:", parsedAction);
-    return false;
-  }, [handleAddNodeFromAI, handleAddSubtaskNode, handleUpdateNode, nodes, setChatMessages]); 
-
-  const handleSendChatMessage = useCallback(async (messageText: string) => {
-    const currentActiveProjectId = currentProjectId; 
-    console.log("[handleSendChatMessage] Initiating. Captured currentActiveProjectId:", currentActiveProjectId);
-    if (!currentActiveProjectId) {
-      console.warn("[handleSendChatMessage] Aborting: currentActiveProjectId is null or undefined.");
-      setChatMessages(prev => [...prev, {
-          id: generateId('error-system'), sender: 'ai',
-          text: "Cannot send message: No active project selected. Please select or create a project in settings.",
-          timestamp: Date.now(), isError: true
-      }]);
-      return;
-    }
-
-    const userMessage: ChatMessage = { id: generateId('user'), sender: 'user', text: messageText, timestamp: Date.now() };
     setChatMessages(prev => [...prev, userMessage]);
     setIsAiTyping(true);
-    const aiMessageId = generateId('ai-stream');
+
+    // Create an initial AI message that will be updated as chunks arrive
+    const aiMessageId = generateId('ai-msg');
     setCurrentAiMessageId(aiMessageId);
-    setChatMessages(prev => [...prev, { id: aiMessageId, sender: 'ai', text: '', timestamp: Date.now(), isProcessing: true }]);
     
-    let fullAiResponse = "";
+    const initialAiMessage: ChatMessage = {
+      id: aiMessageId,
+      sender: 'ai',
+      text: '',
+      timestamp: Date.now(),
+      isProcessing: true
+    };
     
-    await sendMessageToChatStream(
-      messageText,
-      (chunkText, isFinalChunk) => { 
-        if (!isFinalChunk) {
-            fullAiResponse += chunkText;
-            setChatMessages(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: fullAiResponse, isProcessing: true } : msg ));
-        } else { 
-            setIsAiTyping(false);
-            setCurrentAiMessageId(null);
-            console.log("[handleSendChatMessage] AI stream finished. Full response:", fullAiResponse.substring(0,100) + "...");
+    setChatMessages(prev => [...prev, initialAiMessage]);
 
-            const wasActionProcessed = processAiResponseForAction(fullAiResponse, currentActiveProjectId); 
-            console.log("[handleSendChatMessage] processAiResponseForAction result:", wasActionProcessed);
-
-            if (wasActionProcessed) {
-                setChatMessages(prev => prev.filter(msg => msg.id !== aiMessageId));
-            } else {
-                setChatMessages(prev =>
-                    prev
-                        .map(msg =>
-                            msg.id === aiMessageId
-                                ? { ...msg, text: fullAiResponse, isProcessing: false, isError: !fullAiResponse.trim() } 
-                                : msg
-                        )
-                        .filter(msg => !(msg.id === aiMessageId && !fullAiResponse.trim())) 
-                );
-            }
+    try {
+      let fullResponseText = '';
+      
+      // For now, use the existing Gemini service with proper callbacks
+      await sendMessageToChatStream(
+        message,
+        // onChunk callback - updates the AI message with streaming content
+        (chunkText: string, isFinalChunk: boolean) => {
+          if (!isFinalChunk && chunkText) {
+            fullResponseText += chunkText;
+          }
+          
+          setChatMessages(prev => 
+            prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { 
+                    ...msg, 
+                    text: fullResponseText,
+                    isProcessing: !isFinalChunk 
+                  }
+                : msg
+            )
+          );
+          
+          // When streaming is complete, process actions
+          if (isFinalChunk) {
+            console.log('[Chat] AI streaming complete, processing actions...', {
+              fullResponseText,
+              currentProjectId,
+              aiMessageId
+            });
+            
+            // Use setTimeout to ensure the message state is fully updated
+            setTimeout(() => {
+              processAiResponseForAction(fullResponseText, currentProjectId, aiMessageId);
+            }, 200);
+          }
+        },
+        // onError callback
+        (errorMessage: string) => {
+          console.error('[Chat] Error during streaming:', errorMessage);
+          setChatMessages(prev => 
+            prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { 
+                    ...msg, 
+                    text: errorMessage,
+                    isProcessing: false 
+                  }
+                : msg
+            )
+          );
         }
-      },
-      (errorMessage) => { 
-        console.error("[handleSendChatMessage] AI stream error:", errorMessage);
-        setIsAiTyping(false);
-        setCurrentAiMessageId(null);
-        setChatMessages(prev => prev.map(msg => 
-            msg.id === aiMessageId 
-            ? { ...msg, text: errorMessage, isProcessing: false, isError: true } 
-            : msg 
-        ));
-      }
-    );
-  }, [processAiResponseForAction, currentProjectId]); 
+      );
+    } catch (error) {
+      console.error('[Chat] Error sending message:', error);
+      setChatMessages(prev => 
+        prev.map(msg => 
+          msg.id === aiMessageId 
+            ? { 
+                ...msg, 
+                text: 'An error occurred while generating response.',
+                isProcessing: false 
+              }
+            : msg
+        )
+      );
+    }
+
+    setIsAiTyping(false);
+    setCurrentAiMessageId(null);
+  }, [currentProjectId, processAiResponseForAction]);
 
   const handleResetChat = useCallback(() => {
     if (!currentProjectId) return;
-    resetGeminiChatHistory(); 
-    setChatMessages([{
-        id: generateId('ai-greet'), sender: 'ai',
-        text: "Chat history reset. How can I assist?", timestamp: Date.now()
-    }]);
-    setIsAiTyping(false);
-    setCurrentAiMessageId(null);
+    if (window.confirm('Are you sure you want to reset the chat? This will clear all conversation history.')) {
+      setChatMessages([{
+        id: generateId('ai-greet'),
+        sender: 'ai',
+        text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
+        timestamp: Date.now()
+      }]);
+      resetGeminiChatHistory();
+    }
   }, [currentProjectId]);
 
   const primarySelectedNodeId = selectedNodeIds.length > 0 ? selectedNodeIds[selectedNodeIds.length - 1] : null;
   const selectedNodeDetails = primarySelectedNodeId ? nodes.find(n => n.id === primarySelectedNodeId) : null;
   
   const handleInteractionEnd = useCallback(() => {
-    if (!currentProjectId) return;
-    setHistoryTrigger(c => c + 1);
-  }, [currentProjectId]);
+    // TODO: Implement
+  }, []);
 
   const handleUndo = useCallback(() => {
-    if (!currentProjectId || historyIndexRef.current <= 0) return;
-    
-    let prevProjectHistoryIndex = -1;
-    for (let i = historyIndexRef.current - 1; i >= 0; i--) {
-        prevProjectHistoryIndex = i;
-        break; 
-    }
-
-    if (prevProjectHistoryIndex >= 0 && history[prevProjectHistoryIndex]) {
-        historyIndexRef.current = prevProjectHistoryIndex;
-        const prevState = history[historyIndexRef.current];
-        setNodesInternal(prevState.nodes);
-        setEdgesInternal(prevState.edges);
-        setSelectedNodeIdsInternal(prevState.selectedNodeIds);
-        setSelectedEdgeIdInternal(prevState.selectedEdgeId);
-        setHistoryIndex(historyIndexRef.current);
-    }
-  }, [history, currentProjectId]);
+    // TODO: Implement
+  }, []);
 
   const handleRedo = useCallback(() => {
-    if (!currentProjectId || historyIndexRef.current >= history.length - 1) return;
+    // TODO: Implement
+  }, []);
 
-    let nextProjectHistoryIndex = -1;
-    for (let i = historyIndexRef.current + 1; i < history.length; i++) {
-        nextProjectHistoryIndex = i;
-        break;
-    }
-    
-    if (nextProjectHistoryIndex !== -1 && history[nextProjectHistoryIndex]) {
-        historyIndexRef.current = nextProjectHistoryIndex;
-        const nextState = history[historyIndexRef.current];
-        setNodesInternal(nextState.nodes);
-        setEdgesInternal(nextState.edges);
-        setSelectedNodeIdsInternal(nextState.selectedNodeIds);
-        setSelectedEdgeIdInternal(nextState.selectedEdgeId);
-        setHistoryIndex(historyIndexRef.current);
-    }
-  }, [history, currentProjectId]);
+  const toggleGrid = useCallback(() => {
+    setShowGrid(prev => !prev);
+  }, []);
 
-  const toggleGrid = useCallback(() => setShowGrid(prev => !prev), []);
-  const zoomIn = useCallback(() => canvasRef.current?.zoomInCanvas(), []);
-  const zoomOut = useCallback(() => canvasRef.current?.zoomOutCanvas(), []);
+  const zoomIn = useCallback(() => {
+    canvasRef.current?.zoomIn();
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    canvasRef.current?.zoomOut();
+  }, []);
+
   const fitViewToNodes = useCallback(() => {
-    if (currentProjectId) canvasRef.current?.fitView(nodes);
-  }, [nodes, currentProjectId]);
+    canvasRef.current?.fitView(nodes);
+  }, [nodes]);
   
-  const toggleSettingsPanel = useCallback(() => setIsSettingsPanelOpen(prev => !prev), []);
+  const toggleSettingsPanel = useCallback(() => {
+    setIsSettingsPanelOpen(prev => !prev);
+  }, []);
 
-  const handleLogin = useCallback((username: string) => {
-    if (username.trim()) {
-      const user: User = {
-        username: username.trim(),
-        avatarUrl: `https://github.com/${username.trim()}.png`,
-      };
-      setCurrentUser(user);
-      setIsSettingsPanelOpen(false); 
+  const handleLogin = useCallback(async (username: string, password: string) => {
+    try {
+      const result = await authService.login(username, password);
+      if (result.success && result.user) {
+        setCurrentUser(convertBackendUserToLegacy(result.user));
+        setIsAuthenticated(true);
+      }
+      return result;
+    } catch (error) {
+      console.error('[App] Login failed:', error);
+      return { success: false, error: 'Login failed' };
     }
   }, []);
 
@@ -854,21 +918,65 @@ const App: React.FC = () => {
     setCurrentUser(null);
   }, []);
 
-  const handleCreateProject = useCallback((projectName: string) => {
+  const handleCreateProject = useCallback(async (projectName: string) => {
     if (!projectName.trim()) return;
-    const newProject: Project = {
+    
+    try {
+      let newProject: LegacyProject;
+      
+      if (isAuthenticated && isOnline) {
+        // Create project in backend
+        const backendProject = await projectService.createProject({
+          name: projectName.trim(),
+          github_repo_url: '',
+          team_member_usernames: []
+        });
+        
+        // Convert to legacy format
+        newProject = {
+          id: backendProject.id,
+          name: backendProject.name,
+          ownerUsername: currentUser?.username || 'local',
+          createdAt: Date.now(),
+          githubRepoUrl: '',
+          teamMemberUsernames: [],
+        };
+        
+        // Update backend projects list
+        setBackendProjects(prev => [...prev, backendProject]);
+      } else {
+        // Create locally only
+        newProject = {
+          id: generateId('project'),
+          name: projectName.trim(),
+          ownerUsername: currentUser?.username || 'local',
+          createdAt: Date.now(),
+          githubRepoUrl: '',
+          teamMemberUsernames: [],
+        };
+      }
+      
+      setProjects(prev => [...prev, newProject]);
+      setCurrentProjectId(newProject.id);
+      await loadProjectData(newProject.id); 
+      setHistoryTrigger(c => c + 1);
+    } catch (error) {
+      console.error('[App] Failed to create project:', error);
+      // Fall back to local creation
+      const newProject: LegacyProject = {
         id: generateId('project'),
         name: projectName.trim(),
         ownerUsername: currentUser?.username || 'local',
         createdAt: Date.now(),
         githubRepoUrl: '',
         teamMemberUsernames: [],
-    };
-    setProjects(prev => [...prev, newProject]);
-    setCurrentProjectId(newProject.id);
-    loadProjectData(newProject.id); 
-    setHistoryTrigger(c => c + 1);
-  }, [currentUser, loadProjectData]);
+      };
+      setProjects(prev => [...prev, newProject]);
+      setCurrentProjectId(newProject.id);
+      await loadProjectData(newProject.id);
+      setHistoryTrigger(c => c + 1);
+    }
+  }, [currentUser, loadProjectData, isAuthenticated, isOnline]);
 
   const handleSwitchProject = useCallback((projectId: string) => {
     if (projectId === currentProjectId) return;
@@ -893,7 +1001,7 @@ const App: React.FC = () => {
                 loadProjectData(remainingProjects[0].id);
             } else {
                 const defaultProjectName = "Default Project";
-                const newProject: Project = { id: generateId('project'), name: defaultProjectName, ownerUsername: currentUser?.username || 'local', createdAt: Date.now(), githubRepoUrl: '', teamMemberUsernames: [] };
+                const newProject: LegacyProject = { id: generateId('project'), name: defaultProjectName, ownerUsername: currentUser?.username || 'local', createdAt: Date.now(), githubRepoUrl: '', teamMemberUsernames: [] };
                 setProjects([newProject]);
                 setCurrentProjectId(newProject.id);
                 loadProjectData(newProject.id);
@@ -903,7 +1011,7 @@ const App: React.FC = () => {
     }
   }, [projects, currentProjectId, currentUser, loadProjectData, getProjectScopedKey]);
 
-  const handleUpdateProjectDetails = useCallback((projectId: string, updates: Partial<Pick<Project, 'name' | 'githubRepoUrl' | 'teamMemberUsernames'>>) => {
+  const handleUpdateProjectDetails = useCallback((projectId: string, updates: Partial<Pick<LegacyProject, 'name' | 'githubRepoUrl' | 'teamMemberUsernames'>>) => {
     setProjects(prevProjects => 
       prevProjects.map(p => 
         p.id === projectId ? { ...p, ...updates } : p
