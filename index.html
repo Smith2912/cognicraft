@@ -1,31 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CogniCraft</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class', // Enable class-based dark mode
-      theme: {
-        extend: {
-          colors: {
-            // Custom dark theme colors (approximating from image)
-            'dark-bg': '#1F1C2D', // Main background
-            'dark-surface': '#2A263E', // Canvas, card backgrounds
-            'dark-card': '#3B3753', // Slightly lighter card elements or hover states
-            'dark-border': '#4A4566', // Borders
-            'dark-text-primary': '#E0DFFD', // Primary text
-            'dark-text-secondary': '#A09ECB', // Secondary text
-            'dark-accent': '#7B61FF', // Accent color (e.g., for buttons, highlights)
-            'dark-accent-hover': '#937FFF',
-          }
-        }
-      }
-    }
-  </script>
   <style>
     body { 
       margin: 0; 
@@ -56,17 +34,7 @@
       background: #7B61FF; /* dark-accent */
     }
   </style>
-<script type="importmap">
-{
-  "imports": {
-    "react/": "https://esm.sh/react@^19.1.0/",
-    "react": "https://esm.sh/react@^19.1.0",
-    "react-dom/": "https://esm.sh/react-dom@^19.1.0/",
-    "@google/genai": "https://esm.sh/@google/genai@^1.2.0"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
+  <link rel="stylesheet" href="/index.css">
 </head>
 <body class="dark">
   <noscript>You need to enable JavaScript to run this app.</noscript>

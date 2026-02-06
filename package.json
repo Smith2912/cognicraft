@@ -8,18 +8,24 @@
     "build": "vite build",
     "preview": "vite preview",
     "start:dev": "node start-dev.js",
+    "dev:all": "node start-dev.js",
+    "dev:all:open": "node start-dev.js",
     "setup:db": "node setup-database.js"
   },
   "dependencies": {
-    "@google/genai": "^1.2.0",
     "axios": "^1.6.2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
     "@types/node": "^22.14.0",
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.6",
+    "autoprefixer": "^10.4.24",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
     "typescript": "~5.7.2",
     "vite": "^6.2.0"
   }

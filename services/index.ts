@@ -7,10 +7,13 @@ export * from './authService.js';
 
 // Project and data management
 export * from './projectService.js';
+export * from './projectRepository.js';
 
-// AI services
-export * from './backendAiService.js';
-export * from './geminiService.js'; // Keep the original for fallback
+// AI services (local OpenClaw placeholder)
+export * from './geminiService.js';
+
+// OpenClaw integration
+export * from './openclawService.js';
 
 // Migration utilities
 export * from './migrationService.js';

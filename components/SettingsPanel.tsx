@@ -28,6 +28,7 @@ interface SettingsPanelProps {
   onUpdateProjectDetails: (projectId: string, updates: Partial<Pick<Project, 'name' | 'githubRepoUrl' | 'teamMemberUsernames'>>) => void;
   onExportMarkdown: () => void; 
   currentNodesCount: number; 
+  currentProjectId: string | null;
 }
 
 interface SettingsSectionProps {
@@ -63,6 +64,7 @@ const SettingsPanel = ({
   onUpdateProjectDetails,
   onExportMarkdown,
   currentNodesCount,
+  currentProjectId,
 }: SettingsPanelProps): JSX.Element | null => {
   const [githubUsername, setGithubUsername] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
@@ -230,6 +232,22 @@ const SettingsPanel = ({
 
           {/* Projects Section */}
           <SettingsSection title="Projects" icon={<FolderIcon className="w-5 h-5" />}>
+            <div className="flex items-center justify-between p-2 bg-dark-surface rounded-md border border-dark-border mb-3">
+              <div>
+                <div className="text-xs text-dark-text-secondary">Current Project ID</div>
+                <div className="text-sm font-mono text-dark-text-primary break-all">
+                  {currentProjectId || 'No project selected'}
+                </div>
+              </div>
+              {currentProjectId && (
+                <button
+                  onClick={() => navigator.clipboard.writeText(currentProjectId)}
+                  className="text-xs px-2 py-1 rounded-md bg-dark-card hover:bg-dark-border text-dark-text-secondary"
+                >
+                  Copy
+                </button>
+              )}
+            </div>
             <div className="flex items-center space-x-2 mb-3">
               <input
                 type="text"

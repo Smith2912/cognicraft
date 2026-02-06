@@ -2,26 +2,24 @@ import { NodeStatus } from './types';
 
 export const NODE_WIDTH = 220; // Adjusted for new design
 export const NODE_HEIGHT = 100; // Adjusted for new design
-export const GEMINI_API_KEY = process.env.API_KEY; // Assume API_KEY is in process.env
+export const HISTORY_LIMIT = 50;
 
 // Node status representations for dark theme
 // These might be used for icons or subtle indicators, not primarily borders.
 export const NODE_STATUS_CONFIG: { [key in NodeStatus]: { color: string; icon?: string } } = {
-  [NodeStatus.ToDo]: { color: 'text-slate-400' }, 
+  [NodeStatus.ToDo]: { color: 'text-slate-400' },
   [NodeStatus.InProgress]: { color: 'text-yellow-400' },
-  [NodeStatus.Done]: { color: 'text-green-400' }, // Example: suggests a checkmark icon
-  [NodeStatus.Blocked]: { color: 'text-red-400' },   
+  [NodeStatus.Done]: { color: 'text-green-400' },
+  [NodeStatus.Blocked]: { color: 'text-red-400' },
 };
 
 // Kept for reference or if borders are reintroduced subtly
 export const NODE_STATUS_BORDER_COLORS: { [key: string]: string } = {
-  [NodeStatus.ToDo]: 'rgb(148 163 184)', // slate-400 
-  [NodeStatus.InProgress]: 'rgb(250 204 21)', // yellow-400
-  [NodeStatus.Done]: 'rgb(74 222 128)', // green-400
-  [NodeStatus.Blocked]: 'rgb(248 113 113)', // red-400
+  [NodeStatus.ToDo]: 'rgb(148 163 184)',
+  [NodeStatus.InProgress]: 'rgb(250 204 21)',
+  [NodeStatus.Done]: 'rgb(74 222 128)',
+  [NodeStatus.Blocked]: 'rgb(248 113 113)',
 };
-
-export const GEMINI_MODEL_TEXT = 'gemini-2.5-flash-preview-04-17';
 
 export const DEFAULT_NODE_DESCRIPTION_PROMPT = (title: string): string => 
   `Generate a concise, actionable description for a software development task titled "${title}". Focus on key objectives and potential considerations. Maximum 3-4 sentences.`;
@@ -38,7 +36,7 @@ export const INITIAL_VIEWBOX_HEIGHT = 1500;
 export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 3.0;
 export const ZOOM_SENSITIVITY = 0.001;
-export const PAN_SENSITIVITY = 1; 
+export const PAN_SENSITIVITY = 1;
 
 // Constants for node resizing
 export const MIN_NODE_WIDTH = 120; // Adjusted
@@ -59,5 +57,3 @@ export const COLORS = {
   darkAccent: '#7B61FF',
   darkAccentHover: '#937FFF',
 };
-
-export const HISTORY_LIMIT = 20;

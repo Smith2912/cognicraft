@@ -1,20 +1,20 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { NodeData, EdgeData, NodeStatus, Point, ChatMessage, AiAction, AiCreateNodeAction, AiCreateSubtasksAction, User as LegacyUser, Project as LegacyProject } from './types';
-import { NODE_WIDTH, NODE_HEIGHT, GRID_SIZE, HISTORY_LIMIT } from './constants';
+import React, { useState, useCallback, useEffect, useRef, useReducer } from 'react';
+import { NodeData, EdgeData, NodeStatus, Point, ChatMessage, User as LegacyUser, Project as LegacyProject } from './types';
+import { NODE_WIDTH, NODE_HEIGHT, GRID_SIZE } from './constants';
+import { appReducer, createInitialAppState, HistoryState, StateUpdater } from './appReducer';
 import { sendMessageToChatStream, resetChatHistory as resetGeminiChatHistory } from './services/geminiService';
 import { generatePlanMarkdown } from './services/markdownService';
 import { autoLayoutNodes } from './services/layoutService';
+import { parseAiActionsFromResponse } from './services/aiActions';
 
 // New backend service imports
 import { 
   authService, 
-  projectService, 
-  backendAiService, 
-  migrationService,
-  apiClient,
+  projectService,
+  projectRepository,
+  openclawService,
   type Project as BackendProject,
-  type User as BackendUser,
-  type MigrationStatus
+  type User as BackendUser
 } from './services/index.js';
 
 import NodePlannerCanvas, { NodePlannerCanvasHandle } from './components/NodePlannerCanvas';
@@ -24,6 +24,7 @@ import Header from './components/Header';
 import LeftControlsToolbar from './components/LeftControlsToolbar';
 import SettingsPanel from './components/SettingsPanel';
 import ContextMenu from './components/ContextMenu';
+import MainLayout from './components/layout/MainLayout';
 
 const generateId = (prefix: string = 'id'): string => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
@@ -32,13 +33,6 @@ const convertBackendUserToLegacy = (backendUser: BackendUser): LegacyUser => ({
   username: backendUser.username,
   avatarUrl: `https://github.com/${backendUser.username}.png`
 });
-
-interface HistoryState {
-  nodes: NodeData[];
-  edges: EdgeData[];
-  selectedNodeIds: string[];
-  selectedEdgeId: string | null;
-}
 
 interface ContextMenuState {
   clientX: number;
@@ -53,38 +47,31 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<LegacyUser | null>(null);
   const [backendProjects, setBackendProjects] = useState<BackendProject[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [migrationStatus, setMigrationStatus] = useState<MigrationStatus | null>(null);
-  const [showMigrationDialog, setShowMigrationDialog] = useState<boolean>(false);
+  // Migration state hooks removed in Phase 3
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   
   // Legacy state (for backward compatibility during transition)
   const [projects, setProjects] = useState<LegacyProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   
-  const [nodes, setNodesInternal] = useState<NodeData[]>([]);
-  const [edges, setEdgesInternal] = useState<EdgeData[]>([]);
-  const [selectedNodeIds, setSelectedNodeIdsInternal] = useState<string[]>([]);
-  const [selectedEdgeId, setSelectedEdgeIdInternal] = useState<string | null>(null);
+  const [appState, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
+  const { nodes, edges, selectedNodeIds, selectedEdgeId, history, historyIndex } = appState;
   const [connectingInfo, setConnectingInfo] = useState<{ sourceId: string; sourceHandle: 'top' | 'bottom' | 'left' | 'right'; mousePosition: Point } | null>(null);
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isAiTyping, setIsAiTyping] = useState<boolean>(false);
   const [currentAiMessageId, setCurrentAiMessageId] = useState<string | null>(null);
 
-  const [history, setHistory] = useState<HistoryState[]>([]);
-  const [historyIndex, setHistoryIndex] = useState<number>(-1);
-  const historyIndexRef = useRef<number>(-1); 
-
-  const [historyTrigger, setHistoryTrigger] = useState<number>(0); 
-
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const canvasRef = useRef<NodePlannerCanvasHandle>(null);
+  const streamAbortControllerRef = useRef<AbortController | null>(null);
   const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
   const [contextMenuState, setContextMenuState] = useState<ContextMenuState | null>(null);
 
   // State for tracking processed AI messages to prevent duplicate action processing
   const [processedAiMessageIds, setProcessedAiMessageIds] = useState<Set<string>>(new Set());
   const [recentlyCreatedNodes, setRecentlyCreatedNodes] = useState<Map<string, number>>(new Map());
+  const openclawPollRef = useRef<number | null>(null);
 
   // Reset processed messages when switching projects
   useEffect(() => {
@@ -193,39 +180,33 @@ const App: React.FC = () => {
         }
       }
       
-      // Load from localStorage (current implementation)
-      const nodesKey = getProjectScopedKey('plannerNodes', projectId);
-      const edgesKey = getProjectScopedKey('plannerEdges', projectId);
-      const chatKey = getProjectScopedKey('plannerChatMessages', projectId);
-      const selectedNodesKey = getProjectScopedKey('plannerSelectedNodeIds', projectId);
-      const selectedEdgeKey = getProjectScopedKey('plannerSelectedEdgeId', projectId);
-      const historyKey = getProjectScopedKey('plannerHistory', projectId);
-      const historyIndexKey = getProjectScopedKey('plannerHistoryIndex', projectId);
+      // Load from ProjectRepository (localStorage)
+      const snapshot = projectRepository.loadProjectSnapshot(projectId);
 
-      const initialNodes: NodeData[] = nodesKey && localStorage.getItem(nodesKey) ? JSON.parse(localStorage.getItem(nodesKey)!).map((node: NodeData) => ({
+      const initialNodes: NodeData[] = (snapshot.nodes || []).map((node: NodeData) => ({
           ...node,
           width: node.width || NODE_WIDTH,
           height: node.height || NODE_HEIGHT,
           tags: Array.isArray(node.tags) ? node.tags : [],
-          iconId: node.iconId || 'github', 
-          githubIssueUrl: node.githubIssueUrl || undefined, 
-      })) : [];
-      const initialEdges: EdgeData[] = edgesKey && localStorage.getItem(edgesKey) ? JSON.parse(localStorage.getItem(edgesKey)!) : [];
-      const initialSelectedNodes: string[] = selectedNodesKey && localStorage.getItem(selectedNodesKey) ? JSON.parse(localStorage.getItem(selectedNodesKey)!) : [];
-      const initialSelectedEdge: string | null = selectedEdgeKey && localStorage.getItem(selectedEdgeKey) ? JSON.parse(localStorage.getItem(selectedEdgeKey)!) : null;
-      const initialChat: ChatMessage[] = chatKey && localStorage.getItem(chatKey) ? JSON.parse(localStorage.getItem(chatKey)!) : [{
+          iconId: node.iconId || 'github',
+          githubIssueUrl: node.githubIssueUrl || undefined,
+      }));
+      const initialEdges: EdgeData[] = snapshot.edges || [];
+      const initialSelectedNodes: string[] = snapshot.selectedNodeIds || [];
+      const initialSelectedEdge: string | null = snapshot.selectedEdgeId ?? null;
+      const initialChat: ChatMessage[] = snapshot.chatMessages && snapshot.chatMessages.length > 0 ? snapshot.chatMessages : [{
           id: generateId('ai-greet'), sender: 'ai',
           text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
           timestamp: Date.now()
       }];
-      
-      const loadedHistory: HistoryState[] = historyKey && localStorage.getItem(historyKey) ? JSON.parse(localStorage.getItem(historyKey)!) : [];
+
+      const loadedHistory: HistoryState[] = snapshot.history || [];
       let initialHistory: HistoryState[];
       let initialHistoryIndex: number;
 
       if (loadedHistory.length > 0) {
           initialHistory = loadedHistory;
-          initialHistoryIndex = historyIndexKey && localStorage.getItem(historyIndexKey) ? parseInt(localStorage.getItem(historyIndexKey)!, 10) : initialHistory.length -1;
+          initialHistoryIndex = Number.isFinite(snapshot.historyIndex) ? snapshot.historyIndex : initialHistory.length - 1;
           if (initialHistoryIndex < 0 || initialHistoryIndex >= initialHistory.length) {
                initialHistoryIndex = initialHistory.length - 1;
           }
@@ -234,14 +215,18 @@ const App: React.FC = () => {
           initialHistoryIndex = 0;
       }
       
-      setNodesInternal(initialNodes);
-      setEdgesInternal(initialEdges);
-      setSelectedNodeIdsInternal(initialSelectedNodes);
-      setSelectedEdgeIdInternal(initialSelectedEdge);
+      dispatch({
+        type: 'INIT_PROJECT_STATE',
+        payload: {
+          nodes: initialNodes,
+          edges: initialEdges,
+          selectedNodeIds: initialSelectedNodes,
+          selectedEdgeId: initialSelectedEdge,
+          history: initialHistory,
+          historyIndex: initialHistoryIndex,
+        },
+      });
       setChatMessages(initialChat.map(m => ({...m, isProcessing: false})));
-      setHistory(initialHistory);
-      historyIndexRef.current = initialHistoryIndex;
-      setHistoryIndex(initialHistoryIndex);
       setConnectingInfo(null); 
       if (canvasRef.current) canvasRef.current.fitView(initialNodes);
 
@@ -249,18 +234,22 @@ const App: React.FC = () => {
       console.error('[App] Failed to load project data:', error);
       // Initialize with empty state on error
       const initialHistory = [{ nodes: [], edges: [], selectedNodeIds: [], selectedEdgeId: null }];
-      setNodesInternal([]);
-      setEdgesInternal([]);
-      setSelectedNodeIdsInternal([]);
-      setSelectedEdgeIdInternal(null);
+      dispatch({
+        type: 'INIT_PROJECT_STATE',
+        payload: {
+          nodes: [],
+          edges: [],
+          selectedNodeIds: [],
+          selectedEdgeId: null,
+          history: initialHistory,
+          historyIndex: 0,
+        },
+      });
       setChatMessages([{
         id: generateId('ai-greet'), sender: 'ai',
         text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
         timestamp: Date.now()
       }]);
-      setHistory(initialHistory);
-      historyIndexRef.current = 0;
-      setHistoryIndex(0);
       setConnectingInfo(null);
     }
      }, [isAuthenticated, isOnline, backendProjects]);
@@ -273,20 +262,16 @@ const App: React.FC = () => {
       console.log('[App] Initializing projects...');
       
       // Load legacy localStorage projects for backward compatibility
-      const savedProjects = localStorage.getItem('plannerProjects');
-      const savedCurrentProjectId = localStorage.getItem('plannerCurrentProjectId');
+      const savedProjects = projectRepository.loadProjects();
+      const savedCurrentProjectId = projectRepository.loadCurrentProjectId();
 
       let loadedProjects: LegacyProject[] = [];
-      if (savedProjects) {
-        try { 
-          loadedProjects = JSON.parse(savedProjects).map((p: LegacyProject) => ({
-            ...p,
-            githubRepoUrl: p.githubRepoUrl || '',
-            teamMemberUsernames: Array.isArray(p.teamMemberUsernames) ? p.teamMemberUsernames : []
-          })); 
-        } catch(e) { 
-          console.error("Failed to parse projects", e); 
-        }
+      if (savedProjects.length > 0) {
+        loadedProjects = savedProjects.map((p: LegacyProject) => ({
+          ...p,
+          githubRepoUrl: p.githubRepoUrl || '',
+          teamMemberUsernames: Array.isArray(p.teamMemberUsernames) ? p.teamMemberUsernames : []
+        }));
       }
       setProjects(loadedProjects);
 
@@ -322,76 +307,251 @@ const App: React.FC = () => {
     initializeProjects();
   }, [isLoading, currentUser?.username, loadProjectData]);
 
-  const getProjectScopedKey = (baseKey: string, projectId?: string | null) => {
-    const pid = projectId || currentProjectId;
-    if (!pid) return null; 
-    return `${baseKey}_${pid}`;
-  };
-
-    // Auto-save project data with backend integration
+  // Auto-save project data with backend integration
   useEffect(() => {
     if (!currentProjectId) return;
-    
-    const saveProjectData = async () => {
-      try {
-        // Save to localStorage (immediate backup)
-        localStorage.setItem(getProjectScopedKey('plannerNodes')!, JSON.stringify(nodes));
-        
-        // If authenticated and online, also save to backend
-        if (isAuthenticated && isOnline && backendProjects.find(p => p.id === currentProjectId)) {
-          // TODO: Implement backend project data saving
-          console.log('[App] TODO: Save nodes to backend for project:', currentProjectId);
-        }
-      } catch (error) {
-        console.error('[App] Failed to save nodes:', error);
+
+    projectRepository.saveProjectSnapshotDebounced(currentProjectId, {
+      nodes,
+      edges,
+      chatMessages,
+      selectedNodeIds,
+      selectedEdgeId,
+      history,
+      historyIndex,
+    });
+
+    projectRepository.scheduleBackendCanvasSave(
+      currentProjectId,
+      { nodes, edges, selectedNodeIds, selectedEdgeId },
+      {
+        isAuthenticated,
+        isOnline,
+        hasBackendProject: !!backendProjects.find(p => p.id === currentProjectId),
+      }
+    );
+  }, [
+    nodes,
+    edges,
+    chatMessages,
+    selectedNodeIds,
+    selectedEdgeId,
+    history,
+    historyIndex,
+    currentProjectId,
+    isAuthenticated,
+    isOnline,
+    backendProjects,
+  ]);
+
+  useEffect(() => { projectRepository.saveProjects(projects); }, [projects]);
+  useEffect(() => { if (currentProjectId) projectRepository.saveCurrentProjectId(currentProjectId); }, [currentProjectId]);
+  useEffect(() => { currentUser && projectRepository.saveUser(currentUser); }, [currentUser]);
+
+  useEffect(() => {
+    const flushSnapshot = () => {
+      if (!currentProjectId) return;
+      projectRepository.saveProjectSnapshot(currentProjectId, {
+        nodes,
+        edges,
+        chatMessages,
+        selectedNodeIds,
+        selectedEdgeId,
+        history,
+        historyIndex,
+      });
+      projectRepository.flushProjectSaves(currentProjectId);
+    };
+
+    const handleBeforeUnload = () => {
+      flushSnapshot();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushSnapshot();
       }
     };
-    
-    saveProjectData();
-  }, [nodes, currentProjectId, isAuthenticated, isOnline, backendProjects]);
 
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerEdges')!, JSON.stringify(edges)); }, [edges, currentProjectId]);
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerChatMessages')!, JSON.stringify(chatMessages)); }, [chatMessages, currentProjectId]);
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerSelectedNodeIds')!, JSON.stringify(selectedNodeIds)); }, [selectedNodeIds, currentProjectId]);
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerSelectedEdgeId')!, JSON.stringify(selectedEdgeId)); }, [selectedEdgeId, currentProjectId]);
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerHistory')!, JSON.stringify(history)); }, [history, currentProjectId]);
-  useEffect(() => { currentProjectId && localStorage.setItem(getProjectScopedKey('plannerHistoryIndex')!, historyIndex.toString()); }, [historyIndex, currentProjectId]);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
-  useEffect(() => { localStorage.setItem('plannerProjects', JSON.stringify(projects)); }, [projects]);
-  useEffect(() => { if (currentProjectId) localStorage.setItem('plannerCurrentProjectId', currentProjectId);}, [currentProjectId]);
-  useEffect(() => { currentUser && localStorage.setItem('plannerUser', JSON.stringify(currentUser)); }, [currentUser]);
-
-
-  const pushCurrentStateToHistory = useCallback(() => {
-    if (!currentProjectId) return;
-
-    const currentState: HistoryState = {
-        nodes: JSON.parse(JSON.stringify(nodes)), 
-        edges: JSON.parse(JSON.stringify(edges)), 
-        selectedNodeIds: [...selectedNodeIds],
-        selectedEdgeId: selectedEdgeId,
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
+  }, [
+    currentProjectId,
+    nodes,
+    edges,
+    chatMessages,
+    selectedNodeIds,
+    selectedEdgeId,
+    history,
+    historyIndex,
+  ]);
 
-    setHistory(prevHistory => {
-        const newHistoryBase = prevHistory.slice(0, historyIndexRef.current + 1);
-        const updatedHistory = [...newHistoryBase, currentState];
-        
-        const finalHistory = updatedHistory.length > HISTORY_LIMIT 
-            ? updatedHistory.slice(updatedHistory.length - HISTORY_LIMIT) 
-            : updatedHistory;
-        
-        historyIndexRef.current = finalHistory.length - 1;
-        setHistoryIndex(historyIndexRef.current);
-        return finalHistory;
-    });
-  }, [nodes, edges, selectedNodeIds, selectedEdgeId, currentProjectId]); 
+  const setNodesInternal = useCallback((updater: StateUpdater<NodeData[]>) => {
+    if (!currentProjectId) return;
+    dispatch({ type: 'SET_NODES', updater });
+  }, [currentProjectId]);
+
+  const setEdgesInternal = useCallback((updater: StateUpdater<EdgeData[]>) => {
+    if (!currentProjectId) return;
+    dispatch({ type: 'SET_EDGES', updater });
+  }, [currentProjectId]);
+
+  const setSelectedNodeIdsInternal = useCallback((updater: StateUpdater<string[]>) => {
+    if (!currentProjectId) return;
+    dispatch({ type: 'SET_SELECTED_NODE_IDS', updater });
+  }, [currentProjectId]);
+
+  const setSelectedEdgeIdInternal = useCallback((updater: StateUpdater<string | null>) => {
+    if (!currentProjectId) return;
+    dispatch({ type: 'SET_SELECTED_EDGE_ID', updater });
+  }, [currentProjectId]);
+
+  const commitHistory = useCallback(() => {
+    dispatch({ type: 'COMMIT_HISTORY' });
+  }, []);
+
+  const applyOpenClawAction = useCallback((action: { action: string; payload?: any }) => {
+    const payload = action.payload || {};
+
+    if (action.action === 'CREATE_NODE') {
+      const newNode: NodeData = {
+        id: payload.id || generateId('node'),
+        x: payload.x ?? GRID_SIZE * 2,
+        y: payload.y ?? GRID_SIZE * 2,
+        title: payload.title || 'New Task',
+        description: payload.description || 'Describe your task here...',
+        status: payload.status || NodeStatus.ToDo,
+        width: payload.width || NODE_WIDTH,
+        height: payload.height || NODE_HEIGHT,
+        tags: Array.isArray(payload.tags) ? payload.tags : [],
+        iconId: payload.iconId || 'github',
+        githubIssueUrl: payload.githubIssueUrl || undefined,
+      };
+      setNodesInternal(prev => [...prev, newNode]);
+      commitHistory();
+      return;
+    }
+
+    if (action.action === 'UPDATE_NODE') {
+      const nodeId = payload.nodeId || payload.id;
+      if (!nodeId) return;
+      setNodesInternal(prev => prev.map(node => node.id === nodeId ? {
+        ...node,
+        title: payload.title ?? node.title,
+        description: payload.description ?? node.description,
+        status: payload.status ?? node.status,
+        x: payload.x ?? node.x,
+        y: payload.y ?? node.y,
+        width: payload.width ?? node.width,
+        height: payload.height ?? node.height,
+        tags: Array.isArray(payload.tags) ? payload.tags : node.tags,
+        iconId: payload.iconId ?? node.iconId,
+        githubIssueUrl: payload.githubIssueUrl ?? node.githubIssueUrl,
+      } : node));
+      commitHistory();
+      return;
+    }
+
+    if (action.action === 'CREATE_EDGE') {
+      const newEdge: EdgeData = {
+        id: payload.id || generateId('edge'),
+        sourceId: payload.sourceNodeId,
+        targetId: payload.targetNodeId,
+        sourceHandle: payload.sourceHandle,
+        targetHandle: payload.targetHandle,
+      };
+      if (!newEdge.sourceId || !newEdge.targetId) return;
+      setEdgesInternal(prev => [...prev, newEdge]);
+      commitHistory();
+      return;
+    }
+
+    if (action.action === 'CREATE_SUBTASKS') {
+      const parentNodeId = payload.parentNodeId;
+      const parentNodeTitle = payload.parentNodeTitle;
+      const subtasks = Array.isArray(payload.subtasks) ? payload.subtasks : [];
+      if (subtasks.length === 0) return;
+
+      const parentNode = parentNodeId
+        ? nodes.find(n => n.id === parentNodeId)
+        : nodes.find(n => n.title === parentNodeTitle);
+      if (!parentNode) return;
+
+      const createdNodes: NodeData[] = [];
+      const createdEdges: EdgeData[] = [];
+      const baseX = parentNode.x;
+      const baseY = parentNode.y + (parentNode.height || NODE_HEIGHT) + GRID_SIZE * 2;
+
+      subtasks.forEach((task: any, index: number) => {
+        const nodeId = task.id || generateId('node');
+        const newNode: NodeData = {
+          id: nodeId,
+          x: task.x ?? baseX,
+          y: task.y ?? baseY + index * GRID_SIZE * 2,
+          title: task.title || `Subtask ${index + 1}`,
+          description: task.description || '',
+          status: task.status || NodeStatus.ToDo,
+          width: task.width || NODE_WIDTH,
+          height: task.height || NODE_HEIGHT,
+          tags: Array.isArray(task.tags) ? task.tags : [],
+          iconId: task.iconId || 'github',
+          githubIssueUrl: task.githubIssueUrl || undefined,
+        };
+        createdNodes.push(newNode);
+        createdEdges.push({
+          id: generateId('edge'),
+          sourceId: parentNode.id,
+          targetId: nodeId,
+          sourceHandle: task.sourceHandle,
+          targetHandle: task.targetHandle,
+        });
+      });
+
+      setNodesInternal(prev => [...prev, ...createdNodes]);
+      setEdgesInternal(prev => [...prev, ...createdEdges]);
+      commitHistory();
+    }
+  }, [GRID_SIZE, NODE_HEIGHT, NODE_WIDTH, commitHistory, nodes, setEdgesInternal, setNodesInternal]);
+
+  const previousProjectIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (previousProjectIdRef.current && previousProjectIdRef.current !== currentProjectId) {
+      projectRepository.flushProjectSaves(previousProjectIdRef.current);
+    }
+    previousProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
 
   useEffect(() => {
-    if (historyTrigger > 0 && currentProjectId) { 
-        pushCurrentStateToHistory();
-    }
-  }, [historyTrigger, pushCurrentStateToHistory, currentProjectId]);
+    if (!currentProjectId) return;
 
+    const poll = async () => {
+      try {
+        const actions = await openclawService.pollActions(currentProjectId);
+        if (actions.length === 0) return;
+        actions.forEach(action => applyOpenClawAction(action));
+      } catch (error) {
+        console.warn('[OpenClaw] Poll failed:', error);
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 2000);
+    openclawPollRef.current = interval;
+
+    return () => {
+      if (openclawPollRef.current) {
+        window.clearInterval(openclawPollRef.current);
+        openclawPollRef.current = null;
+      }
+    };
+  }, [currentProjectId, applyOpenClawAction]);
+
+  // History management is handled in appReducer.
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -399,12 +559,12 @@ const App: React.FC = () => {
       if (selectedEdgeId && (event.key === 'Delete' || event.key === 'Backspace')) {
         setEdgesInternal(prevEdges => prevEdges.filter(edge => edge.id !== selectedEdgeId));
         setSelectedEdgeIdInternal(null); 
-        setHistoryTrigger(c => c + 1); 
+        commitHistory(); 
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedEdgeId, currentProjectId]);
+  }, [selectedEdgeId, currentProjectId, commitHistory]);
 
 
   const calculateNewNodePosition = useCallback((parentNode?: NodeData, existingSubtasks?: NodeData[], specificPoint?: Point) => {
@@ -437,7 +597,6 @@ const App: React.FC = () => {
         }
         newY = potentialY;
     } else if (nodes.length > 0) {
-        const YOffset = GRID_SIZE * 1.5;
         const XOffset = GRID_SIZE * 1.5;
         let lastNode = nodes.reduce((latest, current) => (current.y > latest.y || (current.y === latest.y && current.x > latest.x)) ? current : latest, nodes[0] || {x:0,y:0,width:0,height:0, title:"", description:"", status: NodeStatus.ToDo, id:"", iconId: "github"});
         
@@ -468,8 +627,8 @@ const App: React.FC = () => {
     setNodesInternal(prev => [...prev, newNode]);
     setSelectedNodeIdsInternal([newNode.id]);
     setSelectedEdgeIdInternal(null);
-    setHistoryTrigger(c => c + 1);
-  }, [calculateNewNodePosition, currentProjectId]);
+    commitHistory();
+  }, [calculateNewNodePosition, currentProjectId, commitHistory]);
 
   const manuallyAddNode = useCallback(() => {
     if (!currentProjectId) return;
@@ -488,8 +647,8 @@ const App: React.FC = () => {
     setNodesInternal(prev => [...prev, newNode]);
     setSelectedNodeIdsInternal([newNode.id]);
     setSelectedEdgeIdInternal(null);
-    setHistoryTrigger(c => c + 1);
-  }, [calculateNewNodePosition, currentProjectId]);
+    commitHistory();
+  }, [calculateNewNodePosition, currentProjectId, commitHistory]);
 
   const handleClearCanvas = useCallback(() => {
     if (!currentProjectId) return;
@@ -498,9 +657,9 @@ const App: React.FC = () => {
       setEdgesInternal([]);
       setSelectedNodeIdsInternal([]);
       setSelectedEdgeIdInternal(null);
-      setHistoryTrigger(c => c + 1);
+      commitHistory();
     }
-  }, [currentProjectId]);
+  }, [currentProjectId, commitHistory]);
 
   const handleAddNodeFromAI = useCallback((title: string, description: string, projectId: string, status: NodeStatus = NodeStatus.ToDo, tags: string[] = [], iconId: string = 'github', githubIssueUrl?: string): NodeData | null => {
     console.log("[handleAddNodeFromAI] Called with projectId:", projectId, "Title:", title);
@@ -538,7 +697,7 @@ const App: React.FC = () => {
     setNodesInternal(prev => [...prev, newNode]);
     setSelectedNodeIdsInternal([newNode.id]); 
     setSelectedEdgeIdInternal(null); 
-    // Note: history trigger is typically called by the caller (processAiResponseForAction) after all parts of an AI action are done.
+    // Note: history commit is typically called by the caller (processAiResponseForAction) after all parts of an AI action are done.
     return newNode;
   }, [calculateNewNodePosition, recentlyCreatedNodes, nodes]);
 
@@ -547,8 +706,8 @@ const App: React.FC = () => {
     setNodesInternal(prev => 
       prev.map(node => node.id === updatedNode.id ? updatedNode : node)
     );
-    setHistoryTrigger(c => c + 1);
-  }, [currentProjectId]);
+    commitHistory();
+  }, [currentProjectId, commitHistory]);
 
   const handleDeleteNode = useCallback((nodeId: string) => {
     if (!currentProjectId) return;
@@ -558,9 +717,9 @@ const App: React.FC = () => {
         edge.sourceId !== nodeId && edge.targetId !== nodeId
       ));
       setSelectedNodeIdsInternal(prev => prev.filter(id => id !== nodeId));
-      setHistoryTrigger(c => c + 1);
+      commitHistory();
     }
-  }, [currentProjectId]);
+  }, [currentProjectId, commitHistory]);
   
   const handleAddSubtaskNode = useCallback((
     parentNodeId: string, 
@@ -638,119 +797,70 @@ const App: React.FC = () => {
     let actionsProcessed = false;
     
     try {
-      // Look for JSON action patterns in the AI response
-      // Pattern 1: Pure JSON object (most common from our system instruction)
-      const pureJsonMatch = aiFullText.match(/^\s*\{[^}]*"action"[^}]*\}$/m);
-      
-      // Pattern 2: JSON within markdown code blocks
-      const codeBlockMatches = aiFullText.match(/```json\s*([\s\S]*?)\s*```/g);
-      
-      // Pattern 3: JSON objects anywhere in the text
-      const jsonMatches = aiFullText.match(/\{[^}]*"action"[^}]*\}/g);
-      
-      const jsonCandidates: string[] = [];
-      const processedJsonStrings = new Set<string>(); // Prevent duplicate JSON processing
-      
-      if (pureJsonMatch) {
-        const jsonStr = pureJsonMatch[0].trim();
-        if (!processedJsonStrings.has(jsonStr)) {
-          jsonCandidates.push(jsonStr);
-          processedJsonStrings.add(jsonStr);
+      const actions = parseAiActionsFromResponse(aiFullText);
+
+      for (const actionData of actions) {
+        if (actionData.action === 'CREATE_NODE') {
+          console.log('[processAiResponseForAction] Processing CREATE_NODE action:', actionData);
+
+          const newNode = handleAddNodeFromAI(
+            actionData.title || 'Untitled Node',
+            actionData.description || '',
+            projectIdForAction,
+            NodeStatus.ToDo,
+            actionData.tags || [],
+            actionData.iconId || 'github',
+            actionData.githubIssueUrl
+          );
+
+          if (newNode) {
+            console.log('[processAiResponseForAction] Successfully created node:', newNode.id);
+            actionsProcessed = true;
+          }
+        } else if (actionData.action === 'CREATE_SUBTASKS') {
+          console.log('[processAiResponseForAction] Processing CREATE_SUBTASKS action:', actionData);
+
+          const parentNode = nodes.find(node =>
+            node.title.toLowerCase() === actionData.parentNodeTitle?.toLowerCase()
+          );
+
+          if (parentNode && actionData.subtasks) {
+            for (const subtask of actionData.subtasks) {
+              const subtaskNode = handleAddSubtaskNode(
+                parentNode.id,
+                subtask.title || 'Untitled Subtask',
+                projectIdForAction,
+                subtask.description || '',
+                subtask.tags || [],
+                subtask.iconId || 'github',
+                subtask.githubIssueUrl
+              );
+
+              if (subtaskNode) {
+                console.log('[processAiResponseForAction] Successfully created subtask:', subtaskNode.id);
+                actionsProcessed = true;
+              }
+            }
+          } else {
+            console.warn('[processAiResponseForAction] Parent node not found for subtasks:', actionData.parentNodeTitle);
+          }
         }
-      }
-      
-      if (codeBlockMatches) {
-        codeBlockMatches.forEach(match => {
-          const content = match.replace(/```json\s*/, '').replace(/\s*```/, '').trim();
-          if (!processedJsonStrings.has(content)) {
-            jsonCandidates.push(content);
-            processedJsonStrings.add(content);
-          }
-        });
-      }
-      
-      if (jsonMatches) {
-        jsonMatches.forEach(match => {
-          const jsonStr = match.trim();
-          if (!processedJsonStrings.has(jsonStr)) {
-            jsonCandidates.push(jsonStr);
-            processedJsonStrings.add(jsonStr);
-          }
-        });
       }
 
-      // Process each unique JSON candidate
-      for (const jsonStr of jsonCandidates) {
-        try {
-          const actionData = JSON.parse(jsonStr);
-          
-          if (actionData.action === 'CREATE_NODE') {
-            console.log('[processAiResponseForAction] Processing CREATE_NODE action:', actionData);
-            
-            const newNode = handleAddNodeFromAI(
-              actionData.title || 'Untitled Node',
-              actionData.description || '',
-              projectIdForAction,
-              NodeStatus.ToDo,
-              actionData.tags || [],
-              actionData.iconId || 'github',
-              actionData.githubIssueUrl
-            );
-            
-            if (newNode) {
-              console.log('[processAiResponseForAction] Successfully created node:', newNode.id);
-              actionsProcessed = true;
-            }
-          } else if (actionData.action === 'CREATE_SUBTASKS') {
-            console.log('[processAiResponseForAction] Processing CREATE_SUBTASKS action:', actionData);
-            
-            // Find the parent node by title
-            const parentNode = nodes.find(node => 
-              node.title.toLowerCase() === actionData.parentNodeTitle?.toLowerCase()
-            );
-            
-            if (parentNode && actionData.subtasks) {
-              for (const subtask of actionData.subtasks) {
-                const subtaskNode = handleAddSubtaskNode(
-                  parentNode.id,
-                  subtask.title || 'Untitled Subtask',
-                  projectIdForAction,
-                  subtask.description || '',
-                  subtask.tags || [],
-                  subtask.iconId || 'github',
-                  subtask.githubIssueUrl
-                );
-                
-                if (subtaskNode) {
-                  console.log('[processAiResponseForAction] Successfully created subtask:', subtaskNode.id);
-                  actionsProcessed = true;
-                }
-              }
-            } else {
-              console.warn('[processAiResponseForAction] Parent node not found for subtasks:', actionData.parentNodeTitle);
-            }
-          }
-        } catch (parseError) {
-          console.warn('[processAiResponseForAction] Failed to parse JSON action:', parseError, 'JSON:', jsonStr);
-        }
-      }
-      
-      // Trigger history update if any actions were processed
       if (actionsProcessed) {
-        setHistoryTrigger(c => c + 1);
+        commitHistory();
         console.log('[processAiResponseForAction] Actions processed successfully, history updated');
       }
-      
-      // Mark this message as processed regardless of whether actions were found
+
       setProcessedAiMessageIds(prev => new Set([...prev, messageId]));
       console.log('[processAiResponseForAction] Message marked as processed:', messageId);
-      
+
     } catch (error) {
       console.error('[processAiResponseForAction] Error processing AI response:', error);
     }
-    
+
     return actionsProcessed;
-  }, [handleAddNodeFromAI, handleAddSubtaskNode, nodes, processedAiMessageIds]);
+  }, [handleAddNodeFromAI, handleAddSubtaskNode, nodes, processedAiMessageIds, commitHistory]);
 
   const handleSendChatMessage = useCallback(async (message: string) => {
     if (!currentProjectId || !message.trim()) return;
@@ -779,6 +889,10 @@ const App: React.FC = () => {
     
     setChatMessages(prev => [...prev, initialAiMessage]);
 
+    streamAbortControllerRef.current?.abort();
+    const streamAbortController = new AbortController();
+    streamAbortControllerRef.current = streamAbortController;
+
     try {
       let fullResponseText = '';
       
@@ -805,6 +919,7 @@ const App: React.FC = () => {
           
           // When streaming is complete, process actions
           if (isFinalChunk) {
+            streamAbortControllerRef.current = null;
             console.log('[Chat] AI streaming complete, processing actions...', {
               fullResponseText,
               currentProjectId,
@@ -819,6 +934,7 @@ const App: React.FC = () => {
         },
         // onError callback
         (errorMessage: string) => {
+          streamAbortControllerRef.current = null;
           console.error('[Chat] Error during streaming:', errorMessage);
           setChatMessages(prev => 
             prev.map(msg => 
@@ -831,9 +947,11 @@ const App: React.FC = () => {
                 : msg
             )
           );
-        }
+        },
+        { signal: streamAbortController.signal }
       );
     } catch (error) {
+      streamAbortControllerRef.current = null;
       console.error('[Chat] Error sending message:', error);
       setChatMessages(prev => 
         prev.map(msg => 
@@ -855,6 +973,8 @@ const App: React.FC = () => {
   const handleResetChat = useCallback(() => {
     if (!currentProjectId) return;
     if (window.confirm('Are you sure you want to reset the chat? This will clear all conversation history.')) {
+      streamAbortControllerRef.current?.abort();
+      streamAbortControllerRef.current = null;
       setChatMessages([{
         id: generateId('ai-greet'),
         sender: 'ai',
@@ -873,23 +993,25 @@ const App: React.FC = () => {
   }, []);
 
   const handleUndo = useCallback(() => {
-    // TODO: Implement
-  }, []);
+    if (!currentProjectId) return;
+    dispatch({ type: 'UNDO' });
+  }, [currentProjectId]);
 
   const handleRedo = useCallback(() => {
-    // TODO: Implement
-  }, []);
+    if (!currentProjectId) return;
+    dispatch({ type: 'REDO' });
+  }, [currentProjectId]);
 
   const toggleGrid = useCallback(() => {
     setShowGrid(prev => !prev);
   }, []);
 
   const zoomIn = useCallback(() => {
-    canvasRef.current?.zoomIn();
+    canvasRef.current?.zoomInCanvas();
   }, []);
 
   const zoomOut = useCallback(() => {
-    canvasRef.current?.zoomOut();
+    canvasRef.current?.zoomOutCanvas();
   }, []);
 
   const fitViewToNodes = useCallback(() => {
@@ -900,18 +1022,13 @@ const App: React.FC = () => {
     setIsSettingsPanelOpen(prev => !prev);
   }, []);
 
-  const handleLogin = useCallback(async (username: string, password: string) => {
-    try {
-      const result = await authService.login(username, password);
-      if (result.success && result.user) {
-        setCurrentUser(convertBackendUserToLegacy(result.user));
-        setIsAuthenticated(true);
-      }
-      return result;
-    } catch (error) {
-      console.error('[App] Login failed:', error);
-      return { success: false, error: 'Login failed' };
-    }
+  const handleLogin = useCallback((username: string) => {
+    if (!username.trim()) return;
+    const user: LegacyUser = {
+      username: username.trim(),
+      avatarUrl: `https://github.com/${username.trim()}.png`,
+    };
+    setCurrentUser(user);
   }, []);
 
   const handleLogout = useCallback(() => {
@@ -959,7 +1076,7 @@ const App: React.FC = () => {
       setProjects(prev => [...prev, newProject]);
       setCurrentProjectId(newProject.id);
       await loadProjectData(newProject.id); 
-      setHistoryTrigger(c => c + 1);
+      commitHistory();
     } catch (error) {
       console.error('[App] Failed to create project:', error);
       // Fall back to local creation
@@ -974,9 +1091,9 @@ const App: React.FC = () => {
       setProjects(prev => [...prev, newProject]);
       setCurrentProjectId(newProject.id);
       await loadProjectData(newProject.id);
-      setHistoryTrigger(c => c + 1);
+      commitHistory();
     }
-  }, [currentUser, loadProjectData, isAuthenticated, isOnline]);
+  }, [currentUser, loadProjectData, isAuthenticated, isOnline, commitHistory]);
 
   const handleSwitchProject = useCallback((projectId: string) => {
     if (projectId === currentProjectId) return;
@@ -989,11 +1106,7 @@ const App: React.FC = () => {
         const remainingProjects = projects.filter(p => p.id !== projectId);
         setProjects(remainingProjects);
         
-        const keysToRemove = ['plannerNodes', 'plannerEdges', 'plannerChatMessages', 'plannerSelectedNodeIds', 'plannerSelectedEdgeId', 'plannerHistory', 'plannerHistoryIndex'];
-        keysToRemove.forEach(baseKey => {
-            const projectKey = getProjectScopedKey(baseKey, projectId);
-            if (projectKey) localStorage.removeItem(projectKey);
-        });
+        projectRepository.deleteProjectData(projectId);
 
         if (currentProjectId === projectId) {
             if (remainingProjects.length > 0) {
@@ -1005,11 +1118,11 @@ const App: React.FC = () => {
                 setProjects([newProject]);
                 setCurrentProjectId(newProject.id);
                 loadProjectData(newProject.id);
-                setHistoryTrigger(c => c + 1); 
+                commitHistory(); 
             }
         }
     }
-  }, [projects, currentProjectId, currentUser, loadProjectData, getProjectScopedKey]);
+  }, [projects, currentProjectId, currentUser, loadProjectData, commitHistory]);
 
   const handleUpdateProjectDetails = useCallback((projectId: string, updates: Partial<Pick<LegacyProject, 'name' | 'githubRepoUrl' | 'teamMemberUsernames'>>) => {
     setProjects(prevProjects => 
@@ -1047,30 +1160,30 @@ const App: React.FC = () => {
     if (!currentProjectId || nodes.length < 1) return;
     const laidOutNodes = autoLayoutNodes(nodes, edges);
     setNodesInternal(laidOutNodes);
-    setHistoryTrigger(c => c + 1);
+    commitHistory();
     if(canvasRef.current) canvasRef.current.fitView(laidOutNodes);
-  }, [currentProjectId, nodes, edges]);
+  }, [currentProjectId, nodes, edges, commitHistory]);
 
 
   const setNodesFromCanvas = useCallback((updater: React.SetStateAction<NodeData[]>) => {
     if (!currentProjectId) return;
     setNodesInternal(updater);
-  }, [currentProjectId]);
+  }, [currentProjectId, setNodesInternal]);
 
   const setEdgesFromCanvas = useCallback((updater: React.SetStateAction<EdgeData[]>) => {
     if (!currentProjectId) return;
     setEdgesInternal(updater);
-  }, [currentProjectId]);
+  }, [currentProjectId, setEdgesInternal]);
 
    const setSelectedNodeIdsFromCanvas = useCallback((updater: React.SetStateAction<string[]>) => {
     if (!currentProjectId) return;
     setSelectedNodeIdsInternal(updater);
-  }, [currentProjectId]);
+  }, [currentProjectId, setSelectedNodeIdsInternal]);
 
   const setSelectedEdgeIdFromCanvas = useCallback((updater: React.SetStateAction<string|null>) => {
     if (!currentProjectId) return;
     setSelectedEdgeIdInternal(updater);
-  }, [currentProjectId]);
+  }, [currentProjectId, setSelectedEdgeIdInternal]);
 
   const handleOpenContextMenu = useCallback((clientX: number, clientY: number, svgX: number, svgY: number) => {
     setContextMenuState({ clientX, clientY, svgX, svgY });
@@ -1089,18 +1202,20 @@ const App: React.FC = () => {
 
 
   return (
-    <div className="flex flex-col h-screen antialiased bg-dark-bg text-dark-text-primary">
-      <Header 
-        onCreateNode={manuallyAddNode} 
-        onClearCanvas={handleClearCanvas}
-        onSettingsClick={toggleSettingsPanel} 
-        currentUser={currentUser}
-        currentProjectName={currentProjectName}
-        currentProjectRepoUrl={currentProject?.githubRepoUrl}
-        currentProjectTeamAvatars={currentProjectTeamAvatars}
-      />
-      <div className="flex flex-1 overflow-hidden">
-        <LeftControlsToolbar 
+    <MainLayout
+      header={
+        <Header
+          onCreateNode={manuallyAddNode}
+          onClearCanvas={handleClearCanvas}
+          onSettingsClick={toggleSettingsPanel}
+          currentUser={currentUser}
+          currentProjectName={currentProjectName}
+          currentProjectRepoUrl={currentProject?.githubRepoUrl}
+          currentProjectTeamAvatars={currentProjectTeamAvatars}
+        />
+      }
+      left={
+        <LeftControlsToolbar
           onToggleGrid={toggleGrid}
           onZoomIn={zoomIn}
           onZoomOut={zoomOut}
@@ -1112,6 +1227,8 @@ const App: React.FC = () => {
           onAutoLayoutNodes={handleAutoLayoutNodes}
           nodesCount={nodes.length}
         />
+      }
+      canvas={
         <main className="flex-1 relative bg-dark-surface">
           {currentProjectId ? (
             <NodePlannerCanvas
@@ -1122,7 +1239,7 @@ const App: React.FC = () => {
               setEdges={setEdgesFromCanvas}
               selectedNodeIds={selectedNodeIds}
               setSelectedNodeIds={setSelectedNodeIdsFromCanvas}
-              selectedEdgeId={selectedEdgeId} 
+              selectedEdgeId={selectedEdgeId}
               setSelectedEdgeId={setSelectedEdgeIdFromCanvas}
               connectingInfo={connectingInfo}
               setConnectingInfo={setConnectingInfo}
@@ -1137,6 +1254,8 @@ const App: React.FC = () => {
             </div>
           )}
         </main>
+      }
+      right={
         <div className="w-80 h-full flex flex-col border-l border-dark-border bg-dark-bg">
             <div className={`
                 ${selectedNodeDetails ? 'h-2/5' : 'h-full'} 
@@ -1177,31 +1296,35 @@ const App: React.FC = () => {
                  </div>
              )}
         </div>
-      </div>
-      <SettingsPanel 
-        isOpen={isSettingsPanelOpen} 
-        onClose={toggleSettingsPanel}
-        currentUser={currentUser}
-        onLogin={handleLogin}
-        onLogout={handleLogout}
-        projects={projects}
-        currentProjectId={currentProjectId}
-        onCreateProject={handleCreateProject}
-        onSwitchProject={handleSwitchProject}
-        onDeleteProject={handleDeleteProject}
-        onUpdateProjectDetails={handleUpdateProjectDetails}
-        onExportMarkdown={handleExportMarkdown}
-        currentNodesCount={nodes.length}
-      />
-      {contextMenuState && currentProjectId && (
-        <ContextMenu
-          clientX={contextMenuState.clientX}
-          clientY={contextMenuState.clientY}
-          onClose={handleCloseContextMenu}
-          onCreateNodeAtPosition={handleContextMenuCreateNode}
+      }
+      settings={
+        <SettingsPanel 
+          isOpen={isSettingsPanelOpen} 
+          onClose={toggleSettingsPanel}
+          currentUser={currentUser}
+          onLogin={handleLogin}
+          onLogout={handleLogout}
+          projects={projects}
+          currentProjectId={currentProjectId}
+          onCreateProject={handleCreateProject}
+          onSwitchProject={handleSwitchProject}
+          onDeleteProject={handleDeleteProject}
+          onUpdateProjectDetails={handleUpdateProjectDetails}
+          onExportMarkdown={handleExportMarkdown}
+          currentNodesCount={nodes.length}
         />
-      )}
-    </div>
+      }
+      contextMenu={
+        contextMenuState && currentProjectId ? (
+          <ContextMenu
+            clientX={contextMenuState.clientX}
+            clientY={contextMenuState.clientY}
+            onClose={handleCloseContextMenu}
+            onCreateNodeAtPosition={handleContextMenuCreateNode}
+          />
+        ) : null
+      }
+    />
   );
 };
 

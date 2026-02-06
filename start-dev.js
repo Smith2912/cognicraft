@@ -87,6 +87,18 @@ process.on('SIGTERM', cleanup);
 process.on('exit', cleanup);
 
 console.log(`\n${colors.green}${colors.bold}✅ Development servers starting...${colors.reset}`);
-console.log(`${colors.backend}Backend:${colors.reset} Running on http://localhost:3000`);
+console.log(`${colors.backend}Backend:${colors.reset} Running on http://localhost:3001`);
 console.log(`${colors.frontend}Frontend:${colors.reset} Running on http://localhost:5173`);
-console.log(`\n${colors.bold}Press Ctrl+C to stop both servers${colors.reset}\n`); 
+console.log(`\n${colors.bold}Press Ctrl+C to stop both servers${colors.reset}\n`);
+
+// Auto-open browser for frontend
+setTimeout(() => {
+    const url = 'http://localhost:5173';
+    if (process.platform === 'win32') {
+        spawn('cmd', ['/c', 'start', url], { stdio: 'ignore', shell: true });
+    } else if (process.platform === 'darwin') {
+        spawn('open', [url], { stdio: 'ignore' });
+    } else {
+        spawn('xdg-open', [url], { stdio: 'ignore' });
+    }
+}, 1000);
