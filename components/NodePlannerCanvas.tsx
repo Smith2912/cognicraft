@@ -20,18 +20,19 @@ export interface NodePlannerCanvasHandle {
 interface NodePlannerCanvasProps {
   nodes: NodeData[];
   edges: EdgeData[];
-  setNodes: (updater: React.SetStateAction<NodeData[]>) => void; 
-  setEdges: (updater: React.SetStateAction<EdgeData[]>) => void; 
+  setNodes: (updater: React.SetStateAction<NodeData[]>) => void;
+  setEdges: (updater: React.SetStateAction<EdgeData[]>) => void;
   selectedNodeIds: string[];
-  setSelectedNodeIds: (updater: React.SetStateAction<string[]>) => void; 
+  setSelectedNodeIds: (updater: React.SetStateAction<string[]>) => void;
   selectedEdgeId: string | null;
-  setSelectedEdgeId: (updater: React.SetStateAction<string | null>) => void; 
+  setSelectedEdgeId: (updater: React.SetStateAction<string | null>) => void;
   connectingInfo: { sourceId: string; sourceHandle: 'top' | 'bottom' | 'left' | 'right'; mousePosition: Point } | null;
   setConnectingInfo: (info: { sourceId: string; sourceHandle: 'top' | 'bottom' | 'left' | 'right'; mousePosition: Point } | null) => void;
   showGrid: boolean;
-  onInteractionEnd: () => void; 
-  onCanvasDoubleClick: (position: Point) => void; 
+  onInteractionEnd: () => void;
+  onCanvasDoubleClick: (position: Point) => void;
   onCanvasContextMenu: (clientX: number, clientY: number, svgX: number, svgY: number) => void; // New prop
+  onEdgeContextMenu?: (clientX: number, clientY: number, edgeId: string) => void;
 }
 
 const generateId = (prefix: string = 'id'): string => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -43,14 +44,15 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
   setEdges,
   selectedNodeIds,
   setSelectedNodeIds,
-  selectedEdgeId,      
-  setSelectedEdgeId,   
+  selectedEdgeId,
+  setSelectedEdgeId,
   connectingInfo,
   setConnectingInfo,
   showGrid,
   onInteractionEnd,
   onCanvasDoubleClick,
-  onCanvasContextMenu, 
+  onCanvasContextMenu,
+  onEdgeContextMenu,
 }, ref) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const [viewBox, setViewBox] = useState<[number, number, number, number]>([
@@ -76,12 +78,12 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
       y: (e.clientY - ctm.f) / ctm.d,
     };
   }, []);
-  
+
   const applyZoom = useCallback((scaleFactor: number, anchorX?: number, anchorY?: number) => {
     setViewBox(currentViewBox => {
         const [vx, vy, vw, vh] = currentViewBox;
-        
-        const newWidthUnbounded = vw / scaleFactor; 
+
+        const newWidthUnbounded = vw / scaleFactor;
         const newHeightUnbounded = vh / scaleFactor;
 
         const newWidth = Math.max(INITIAL_VIEWBOX_WIDTH / MAX_SCALE, Math.min(INITIAL_VIEWBOX_WIDTH / MIN_SCALE, newWidthUnbounded));
@@ -107,8 +109,8 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
 
 
   useImperativeHandle(ref, () => ({
-    zoomInCanvas: () => applyZoom(1.2), 
-    zoomOutCanvas: () => applyZoom(1 / 1.2), 
+    zoomInCanvas: () => applyZoom(1.2),
+    zoomOutCanvas: () => applyZoom(1 / 1.2),
     fitView: (nodesToFit: NodeData[] = nodes) => {
         if (nodesToFit.length === 0) {
             setViewBox([
@@ -136,11 +138,11 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         const contentCenterX = minX + actualContentWidth / 2;
         const contentCenterY = minY + actualContentHeight / 2;
 
-        const padding = 100; 
+        const padding = 100;
         const targetViewWidth = actualContentWidth + 2 * padding;
         const targetViewHeight = actualContentHeight + 2 * padding;
 
-        if (targetViewWidth <= 0 || targetViewHeight <= 0) { 
+        if (targetViewWidth <= 0 || targetViewHeight <= 0) {
              setViewBox([
                 -INITIAL_VIEWBOX_WIDTH / 2,
                 -INITIAL_VIEWBOX_HEIGHT / 2,
@@ -152,9 +154,9 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
 
         const canvasClientWidth = svgRef.current?.clientWidth || INITIAL_VIEWBOX_WIDTH;
         const canvasClientHeight = svgRef.current?.clientHeight || INITIAL_VIEWBOX_HEIGHT;
-        
-        const aspectRatioCanvas = canvasClientWidth / (canvasClientHeight || 1); 
-        const aspectRatioTarget = targetViewWidth / (targetViewHeight || 1); 
+
+        const aspectRatioCanvas = canvasClientWidth / (canvasClientHeight || 1);
+        const aspectRatioTarget = targetViewWidth / (targetViewHeight || 1);
 
         let finalVw: number;
         let finalVh: number;
@@ -166,20 +168,20 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
             finalVh = targetViewHeight;
             finalVw = targetViewHeight * aspectRatioCanvas;
         }
-        
+
         if (finalVw <=0) finalVw = INITIAL_VIEWBOX_WIDTH;
         if (finalVh <=0) finalVh = INITIAL_VIEWBOX_HEIGHT;
 
 
         const finalVx = contentCenterX - finalVw / 2;
         const finalVy = contentCenterY - finalVh / 2;
-        
+
         setViewBox([finalVx, finalVy, finalVw, finalVh]);
     }
   }), [applyZoom, nodes, NODE_WIDTH, NODE_HEIGHT, INITIAL_VIEWBOX_WIDTH, INITIAL_VIEWBOX_HEIGHT]);
 
 
-  const handleWheel = useCallback((e: WheelEvent) => { 
+  const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
     const scaleFactor = 1 - e.deltaY * ZOOM_SENSITIVITY;
     const mousePos = getMousePositionInSVG(e);
@@ -200,9 +202,9 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
 
   const handleSvgMouseDown = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     const targetIsSvgBackground = e.target === svgRef.current || (e.target as SVGElement).classList.contains('svg-background-rect');
-    
+
     if (targetIsSvgBackground && selectedEdgeId !== null) {
-      setSelectedEdgeId(null); 
+      setSelectedEdgeId(null);
       onInteractionEnd();
     }
 
@@ -210,12 +212,12 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         const svgMousePos = getMousePositionInSVG(e);
         setSelectionRect({ clientStartX: e.clientX, clientStartY: e.clientY, startX: svgMousePos.x, startY: svgMousePos.y, currentX: svgMousePos.x, currentY: svgMousePos.y });
         if (selectedNodeIds.length > 0) {
-          setSelectedNodeIds([]); 
+          setSelectedNodeIds([]);
         }
     } else if (e.button === 0 && e.shiftKey && targetIsSvgBackground) {
         const svgMousePos = getMousePositionInSVG(e);
         setSelectionRect({ clientStartX: e.clientX, clientStartY: e.clientY, startX: svgMousePos.x, startY: svgMousePos.y, currentX: svgMousePos.x, currentY: svgMousePos.y });
-    } else if ((e.button === 1 || (e.button === 0 && e.altKey)) && !resizingNodeInfo && targetIsSvgBackground) { 
+    } else if ((e.button === 1 || (e.button === 0 && e.altKey)) && !resizingNodeInfo && targetIsSvgBackground) {
       e.preventDefault();
       setIsPanning(true);
       setLastMousePosition({ x: e.clientX, y: e.clientY });
@@ -223,7 +225,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
     }
 
     if (connectingInfo && targetIsSvgBackground) {
-      setConnectingInfo(null); 
+      setConnectingInfo(null);
       onInteractionEnd();
     }
   }, [getMousePositionInSVG, resizingNodeInfo, connectingInfo, setSelectedNodeIds, setSelectedEdgeId, setConnectingInfo, selectedNodeIds, selectedEdgeId, onInteractionEnd]);
@@ -231,29 +233,29 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
   const handleNodeMouseDown = useCallback((e: React.MouseEvent<SVGGElement>, nodeId: string) => {
     const targetNode = nodes.find(n => n.id === nodeId);
     if (!targetNode) {
-        e.stopPropagation(); 
+        e.stopPropagation();
         return;
     }
 
     if (connectingInfo && connectingInfo.sourceId !== nodeId) {
-      e.preventDefault(); 
-      e.stopPropagation(); 
+      e.preventDefault();
+      e.stopPropagation();
       const sourceNode = nodes.find(n => n.id === connectingInfo.sourceId);
       if (!sourceNode) {
         setConnectingInfo(null);
         return;
       }
 
-      let targetHandle: 'top' | 'bottom' | 'left' | 'right' = 'left'; 
+      let targetHandle: 'top' | 'bottom' | 'left' | 'right' = 'left';
       const dx = (targetNode.x + (targetNode.width || NODE_WIDTH) / 2) - (sourceNode.x + (sourceNode.width || NODE_WIDTH) / 2);
       const dy = (targetNode.y + (targetNode.height || NODE_HEIGHT) / 2) - (sourceNode.y + (sourceNode.height || NODE_HEIGHT) / 2);
 
-      if (Math.abs(dx) > Math.abs(dy)) { 
+      if (Math.abs(dx) > Math.abs(dy)) {
         targetHandle = dx > 0 ? 'left' : 'right';
-      } else { 
+      } else {
         targetHandle = dy > 0 ? 'top' : 'bottom';
       }
-      
+
       const newEdge: EdgeData = {
         id: generateId('edge'),
         sourceId: connectingInfo.sourceId,
@@ -263,13 +265,13 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
       };
       setEdges(prev => [...prev, newEdge]);
       setConnectingInfo(null);
-      setSelectedNodeIds([nodeId]); 
+      setSelectedNodeIds([nodeId]);
       setSelectedEdgeId(null);
-      onInteractionEnd(); 
-      return; 
+      onInteractionEnd();
+      return;
     }
 
-    e.stopPropagation(); 
+    e.stopPropagation();
     const isSelected = selectedNodeIds.includes(nodeId);
     let newSelectedIds = [...selectedNodeIds];
     let selectionChanged = false;
@@ -280,26 +282,26 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
     } else if (!isSelected) {
         newSelectedIds = [nodeId];
         selectionChanged = true;
-    } else if (newSelectedIds.length > 1) { 
+    } else if (newSelectedIds.length > 1) {
         newSelectedIds = [nodeId];
         selectionChanged = true;
     }
-    
+
     if (selectionChanged) {
         setSelectedNodeIds(newSelectedIds);
         if (selectedEdgeId !== null) setSelectedEdgeId(null);
     }
-    
+
     const mousePos = getMousePositionInSVG(e);
     const nodesToDrag = nodes.filter(n => newSelectedIds.includes(n.id));
 
-    if (nodesToDrag.length > 0 && e.button === 0 && !e.altKey) { 
+    if (nodesToDrag.length > 0 && e.button === 0 && !e.altKey) {
       setDraggingNodesInfo(
         nodesToDrag.map(n => ({
           nodeId: n.id,
-          initialX: n.x, 
+          initialX: n.x,
           initialY: n.y,
-          offsetX: n.x - mousePos.x, 
+          offsetX: n.x - mousePos.x,
           offsetY: n.y - mousePos.y,
         }))
       );
@@ -324,7 +326,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
               if (dragInfo) {
                 const rawNewX = currentMousePos.x + dragInfo.offsetX;
                 const rawNewY = currentMousePos.y + dragInfo.offsetY;
-                
+
                 const snappedX = Math.round(rawNewX / GRID_SIZE) * GRID_SIZE;
                 const snappedY = Math.round(rawNewY / GRID_SIZE) * GRID_SIZE;
 
@@ -418,7 +420,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         } else {
             finalSelectedIds = newlySelectedInRect;
         }
-        
+
         if (JSON.stringify(finalSelectedIds) !== JSON.stringify(selectedNodeIds)) {
             setSelectedNodeIds(finalSelectedIds);
             if (selectedEdgeId !== null) setSelectedEdgeId(null);
@@ -426,7 +428,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         }
         setSelectionRect(null);
     }
-    
+
     if (interactionOccurred) {
         onInteractionEnd();
     }
@@ -434,25 +436,25 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
 
 
   const handleNodeClick = useCallback((e: React.MouseEvent<SVGGElement>, nodeId: string) => {
-    if (connectingInfo) { 
+    if (connectingInfo) {
         if (connectingInfo.sourceId === nodeId) {
-            setConnectingInfo(null); 
+            setConnectingInfo(null);
             onInteractionEnd();
         }
-        return; 
+        return;
     }
-    
-    const dragThreshold = 3; 
-    const clientX = e.clientX; 
+
+    const dragThreshold = 3;
+    const clientX = e.clientX;
     const clientY = e.clientY;
     const wasDrag = draggingNodesInfo || (lastMousePosition && (Math.abs(clientX - lastMousePosition.x) > dragThreshold || Math.abs(clientY - lastMousePosition.y) > dragThreshold));
 
-    if (wasDrag && draggingNodesInfo) { 
+    if (wasDrag && draggingNodesInfo) {
       return;
     }
 
-    e.stopPropagation(); 
-    
+    e.stopPropagation();
+
     let newSelectedIds: string[];
     const isSelected = selectedNodeIds.includes(nodeId);
     let selectionChanged = false;
@@ -462,7 +464,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
             newSelectedIds = [nodeId];
             selectionChanged = true;
         } else {
-            newSelectedIds = selectedNodeIds; 
+            newSelectedIds = selectedNodeIds;
         }
     } else {
       newSelectedIds = isSelected ? selectedNodeIds.filter(id => id !== nodeId) : [...selectedNodeIds, nodeId];
@@ -472,10 +474,10 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
     if (selectionChanged) {
         setSelectedNodeIds(newSelectedIds);
         if (selectedEdgeId !== null) setSelectedEdgeId(null);
-        onInteractionEnd(); 
+        onInteractionEnd();
     } else if (isSelected && selectedNodeIds.length === 1 && selectedEdgeId !== null) {
         setSelectedEdgeId(null);
-        onInteractionEnd(); 
+        onInteractionEnd();
     }
 
   }, [connectingInfo, selectedNodeIds, setSelectedNodeIds, setConnectingInfo, setSelectedEdgeId, selectedEdgeId, draggingNodesInfo, lastMousePosition, onInteractionEnd]);
@@ -495,11 +497,11 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         case 'right': startX += nodeWidth; startY += nodeHeight/2; break;
     }
     setConnectingInfo({ sourceId: nodeId, sourceHandle: handle, mousePosition: { x: startX, y: startY }});
-    
+
     let interactionHappened = false;
 
     if (selectedEdgeId !== null) {
-        setSelectedEdgeId(null); 
+        setSelectedEdgeId(null);
         interactionHappened = true;
     }
 
@@ -514,12 +516,12 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
             interactionHappened = true;
         }
     }
-    
+
     if (interactionHappened) {
         onInteractionEnd();
     }
   }, [nodes, setConnectingInfo, selectedEdgeId, setSelectedEdgeId, selectedNodeIds, setSelectedNodeIds, onInteractionEnd, NODE_WIDTH, NODE_HEIGHT]);
-  
+
   const handleNodeResizeStart = useCallback((e: React.MouseEvent<SVGRectElement>, nodeId: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -529,7 +531,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
     if (selectedNodeIds.length !== 1 || selectedNodeIds[0] !== nodeId) {
         setSelectedNodeIds([nodeId]);
         if (selectedEdgeId !== null) setSelectedEdgeId(null);
-        onInteractionEnd(); 
+        onInteractionEnd();
     }
 
     const mousePos = getMousePositionInSVG(e);
@@ -552,11 +554,24 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         interactionHappened = true;
     }
     if (selectedNodeIds.length > 0) {
-        setSelectedNodeIds([]); 
+        setSelectedNodeIds([]);
         interactionHappened = true;
     }
     if (interactionHappened) onInteractionEnd();
   }, [selectedEdgeId, setSelectedEdgeId, selectedNodeIds, setSelectedNodeIds, onInteractionEnd]);
+
+  const handleEdgeContextMenu = useCallback((edgeId: string, clientX: number, clientY: number) => {
+    if (selectedEdgeId !== edgeId) {
+      setSelectedEdgeId(edgeId);
+    }
+    if (selectedNodeIds.length > 0) {
+      setSelectedNodeIds([]);
+    }
+    if (onEdgeContextMenu) {
+      onEdgeContextMenu(clientX, clientY, edgeId);
+    }
+    onInteractionEnd();
+  }, [onEdgeContextMenu, onInteractionEnd, selectedEdgeId, selectedNodeIds, setSelectedEdgeId, setSelectedNodeIds]);
 
 
   useEffect(() => {
@@ -606,7 +621,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
         case 'left': startY += nodeHeight/2; break;
         case 'right': startX += nodeWidth; startY += nodeHeight/2; break;
     }
-    
+
     return (
       <line
         x1={startX}
@@ -618,7 +633,7 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
       />
     );
   };
-  
+
   const renderSelectionRect = () => {
     if (!selectionRect) return null;
     const x = Math.min(selectionRect.startX, selectionRect.currentX);
@@ -635,13 +650,13 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
       />
     );
   };
-  
+
   const vbX = viewBox[0];
   const vbY = viewBox[1];
   const vbWidth = viewBox[2];
   const vbHeight = viewBox[3];
 
-  const BORDER_BUFFER_FACTOR = 1; 
+  const BORDER_BUFFER_FACTOR = 1;
   const gridRectX = vbX - vbWidth * BORDER_BUFFER_FACTOR;
   const gridRectY = vbY - vbHeight * BORDER_BUFFER_FACTOR;
   const gridRectWidth = vbWidth * (1 + 2 * BORDER_BUFFER_FACTOR);
@@ -655,23 +670,23 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
       height="100%"
       viewBox={`${vbX} ${vbY} ${vbWidth} ${vbHeight}`}
       onMouseDown={handleSvgMouseDown}
-      onMouseUp={handleMouseUp} 
+      onMouseUp={handleMouseUp}
       onMouseMove={(e) => !isPanning && !draggingNodesInfo && !resizingNodeInfo && !selectionRect && !connectingInfo ? null : handleMouseMove(e)}
       onDoubleClick={handleCanvasDoubleClick}
       onContextMenu={handleContextMenu}
       className={`cursor-auto ${isPanning || draggingNodesInfo ? 'grabbing' : 'grab'} bg-dark-surface`}
       style={{ userSelect: 'none' }}
-      aria-label="Node planning canvas" 
+      aria-label="Node planning canvas"
     >
       <defs>
         <marker
             id="arrowhead"
-            viewBox="0 0 12 8" 
-            refX="11"          
-            refY="4"           
+            viewBox="0 0 12 8"
+            refX="11"
+            refY="4"
             markerUnits="userSpaceOnUse"
-            markerWidth="12"  
-            markerHeight="8" 
+            markerWidth="12"
+            markerHeight="8"
             orient="auto-start-reverse"
         >
             <path d="M 0 0 L 12 4 L 0 8 z" fill={COLORS.darkBorder} />
@@ -682,23 +697,23 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
             </pattern>
         )}
       </defs>
-      
-      <rect 
-        x={gridRectX} 
-        y={gridRectY} 
-        width={gridRectWidth} 
-        height={gridRectHeight} 
-        fill={COLORS.darkSurface} 
-        className="svg-background-rect" 
+
+      <rect
+        x={gridRectX}
+        y={gridRectY}
+        width={gridRectWidth}
+        height={gridRectHeight}
+        fill={COLORS.darkSurface}
+        className="svg-background-rect"
       />
       {showGrid && (
-        <rect 
-            x={gridRectX} 
-            y={gridRectY} 
-            width={gridRectWidth} 
-            height={gridRectHeight} 
-            fill="url(#dotGrid)" 
-            className="svg-background-rect pointer-events-none" 
+        <rect
+            x={gridRectX}
+            y={gridRectY}
+            width={gridRectWidth}
+            height={gridRectHeight}
+            fill="url(#dotGrid)"
+            className="svg-background-rect pointer-events-none"
         />
       )}
 
@@ -711,12 +726,13 @@ const NodePlannerCanvas = forwardRef<NodePlannerCanvasHandle, NodePlannerCanvasP
             <EdgeItem 
                 key={edge.id}
                 id={edge.id} 
-                sourceNode={sourceNode} 
-                targetNode={targetNode} 
+                sourceNode={sourceNode}
+                targetNode={targetNode}
                 sourceHandlePosition={edge.sourceHandle}
                 targetHandlePosition={edge.targetHandle}
                 isSelected={edge.id === selectedEdgeId}
                 onEdgeClick={handleEdgeClick}
+                onEdgeContextMenu={handleEdgeContextMenu}
             />
         );
       })}

@@ -60,10 +60,33 @@ const checkValidation = (req: express.Request, res: express.Response): boolean =
 };
 
 // Helper function to check project ownership
-const checkProjectOwnership = async (projectId: string, userId: string): Promise<boolean> => {
+const checkProjectOwnership = async (
+  projectId: string,
+  userId: string,
+  username: string,
+  requiredPermission: 'read' | 'write' = 'read'
+): Promise<boolean> => {
   try {
     const project = await Project.findByPk(projectId);
-    return project?.owner_user_id === userId;
+    if (!project) return false;
+
+    const teamUsernames = Array.isArray(project.team_member_usernames)
+      ? project.team_member_usernames
+      : [];
+    const teamMembers = Array.isArray(project.team_members)
+      ? project.team_members
+      : [];
+
+    const isOwner = project.owner_user_id === userId;
+    const memberEntry = teamMembers.find(member => member?.username === username);
+    const isTeamMember = !!memberEntry || teamUsernames.includes(username);
+    const role = memberEntry?.role || (isTeamMember ? 'editor' : undefined);
+
+    if (requiredPermission === 'write') {
+      return isOwner || role === 'editor';
+    }
+
+    return isOwner || isTeamMember;
   } catch (error) {
     return false;
   }
@@ -85,7 +108,7 @@ router.get('/:projectId/canvas',
       }
 
       // Check project ownership
-      const hasAccess = await checkProjectOwnership(projectId, user.id);
+      const hasAccess = await checkProjectOwnership(projectId, user.id, user.username, 'read');
       if (!hasAccess) {
         return res.status(404).json({
           error: 'Not Found',
@@ -134,7 +157,7 @@ router.put('/:projectId/canvas',
       }
 
       // Check project ownership
-      const hasAccess = await checkProjectOwnership(projectId, user.id);
+      const hasAccess = await checkProjectOwnership(projectId, user.id, user.username, 'write');
       if (!hasAccess) {
         return res.status(404).json({
           error: 'Not Found',
@@ -216,7 +239,7 @@ router.post('/:projectId/nodes',
       }
 
       // Check project ownership
-      const hasAccess = await checkProjectOwnership(projectId, user.id);
+      const hasAccess = await checkProjectOwnership(projectId, user.id, user.username, 'write');
       if (!hasAccess) {
         return res.status(404).json({
           error: 'Not Found',
@@ -260,7 +283,7 @@ router.put('/:projectId/nodes/:nodeId',
       }
 
       // Check project ownership
-      const hasAccess = await checkProjectOwnership(projectId, user.id);
+      const hasAccess = await checkProjectOwnership(projectId, user.id, user.username, 'write');
       if (!hasAccess) {
         return res.status(404).json({
           error: 'Not Found',
@@ -306,7 +329,7 @@ router.delete('/:projectId/nodes/:nodeId',
       }
 
       // Check project ownership
-      const hasAccess = await checkProjectOwnership(projectId, user.id);
+      const hasAccess = await checkProjectOwnership(projectId, user.id, user.username, 'write');
       if (!hasAccess) {
         return res.status(404).json({
           error: 'Not Found',

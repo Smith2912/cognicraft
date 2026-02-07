@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { NodeData, NodeStatus } from '../types';
-import { generateText } from '../services/geminiService';
-import { DEFAULT_NODE_DESCRIPTION_PROMPT, DEFAULT_SUBTASK_PROMPT } from '../constants';
+import { getAiProvider } from '../services/aiProvider';
+import { buildNodeDescriptionPrompt, buildSubtaskPrompt } from '../services/aiPrompts';
 import { SparklesIcon, TrashIcon, PlusIcon, ICON_MAP, LinkIcon } from './icons';
 
 interface NodeEditorSidebarProps {
@@ -39,6 +39,7 @@ const NodeEditorSidebar = ({ node, onUpdateNode, onDeleteNode, onAddSubtaskNode,
   const [githubIssueUrl, setGithubIssueUrl] = useState<string>(''); // New state for GitHub Issue URL
   const [isLoadingDescription, setIsLoadingDescription] = useState(false);
   const [isLoadingSubtasks, setIsLoadingSubtasks] = useState(false);
+  const aiProvider = getAiProvider();
 
   useEffect(() => {
     if (node) {
@@ -112,9 +113,9 @@ const NodeEditorSidebar = ({ node, onUpdateNode, onDeleteNode, onAddSubtaskNode,
   const handleGenerateDescription = async () => {
     if (!node || !title) return;
     setIsLoadingDescription(true);
-    const prompt = DEFAULT_NODE_DESCRIPTION_PROMPT(title);
+    const prompt = buildNodeDescriptionPrompt(title);
     try {
-      const generatedDesc = await generateText(prompt);
+      const generatedDesc = await aiProvider.generateText(prompt);
       if (!generatedDesc.startsWith("Error:")) {
         setDescription(generatedDesc);
         // Pass the currently edited title, new description, and other current states
@@ -134,9 +135,9 @@ const NodeEditorSidebar = ({ node, onUpdateNode, onDeleteNode, onAddSubtaskNode,
   const handleGenerateSubtasks = async () => {
     if (!node || !title) return;
     setIsLoadingSubtasks(true);
-    const prompt = DEFAULT_SUBTASK_PROMPT(title, description);
+    const prompt = buildSubtaskPrompt(title, description);
     try {
-      const generatedSubtasksText = await generateText(prompt);
+      const generatedSubtasksText = await aiProvider.generateText(prompt);
       if (!generatedSubtasksText.startsWith("Error:")) {
         const subtaskTitles = generatedSubtasksText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
         subtaskTitles.forEach(subTitle => {

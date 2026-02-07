@@ -1,8 +1,9 @@
-import React, { useState, useCallback, useEffect, useRef, useReducer } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useReducer, useMemo } from 'react';
 import { NodeData, EdgeData, NodeStatus, Point, ChatMessage, User as LegacyUser, Project as LegacyProject } from './types';
 import { NODE_WIDTH, NODE_HEIGHT, GRID_SIZE } from './constants';
 import { appReducer, createInitialAppState, HistoryState, StateUpdater } from './appReducer';
-import { sendMessageToChatStream, resetChatHistory as resetGeminiChatHistory } from './services/geminiService';
+import { getAiProvider } from './services/aiProvider';
+import { buildChatPrompt } from './services/aiPrompts';
 import { generatePlanMarkdown } from './services/markdownService';
 import { autoLayoutNodes } from './services/layoutService';
 import { parseAiActionsFromResponse } from './services/aiActions';
@@ -13,6 +14,7 @@ import {
   projectService,
   projectRepository,
   openclawService,
+  apiClient,
   type Project as BackendProject,
   type User as BackendUser
 } from './services/index.js';
@@ -25,6 +27,7 @@ import LeftControlsToolbar from './components/LeftControlsToolbar';
 import SettingsPanel from './components/SettingsPanel';
 import ContextMenu from './components/ContextMenu';
 import MainLayout from './components/layout/MainLayout';
+import Toast, { ToastMessage, ToastType } from './components/Toast';
 
 const generateId = (prefix: string = 'id'): string => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
@@ -37,8 +40,10 @@ const convertBackendUserToLegacy = (backendUser: BackendUser): LegacyUser => ({
 interface ContextMenuState {
   clientX: number;
   clientY: number;
-  svgX: number;
-  svgY: number;
+  kind: 'canvas' | 'edge';
+  svgX?: number;
+  svgY?: number;
+  edgeId?: string;
 }
 
 const App: React.FC = () => {
@@ -65,13 +70,53 @@ const App: React.FC = () => {
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const canvasRef = useRef<NodePlannerCanvasHandle>(null);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
+  const aiProvider = useRef(getAiProvider()).current;
   const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
   const [contextMenuState, setContextMenuState] = useState<ContextMenuState | null>(null);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [nodeSearchQuery, setNodeSearchQuery] = useState('');
+  const [copiedNodes, setCopiedNodes] = useState<NodeData[] | null>(null);
+  const [copiedEdges, setCopiedEdges] = useState<EdgeData[] | null>(null);
+  const [pasteCount, setPasteCount] = useState(0);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(toast => toast.id !== id));
+  }, []);
+
+  const pushToast = useCallback((type: ToastType, title: string, description?: string, ttl = 4500) => {
+    const id = generateId('toast');
+    setToasts(prev => [...prev, { id, type, title, description }]);
+    window.setTimeout(() => dismissToast(id), ttl);
+  }, [dismissToast]);
 
   // State for tracking processed AI messages to prevent duplicate action processing
   const [processedAiMessageIds, setProcessedAiMessageIds] = useState<Set<string>>(new Set());
   const [recentlyCreatedNodes, setRecentlyCreatedNodes] = useState<Map<string, number>>(new Map());
+  const [recentOpenclawActions, setRecentOpenclawActions] = useState<Array<{ action: string; payload?: any; timestamp: number }>>([]);
   const openclawPollRef = useRef<number | null>(null);
+  const openclawSocketRef = useRef<WebSocket | null>(null);
+
+  const [apiHealthy, setApiHealthy] = useState<boolean>(true);
+  const [isCheckingHealth, setIsCheckingHealth] = useState<boolean>(false);
+  const [requireAiApproval, setRequireAiApproval] = useState<boolean>(() => {
+    const stored = localStorage.getItem('cognicraft_require_ai_approval');
+    return stored === 'true';
+  });
+  const [pendingAiActions, setPendingAiActions] = useState<Array<{ id: string; projectId: string; actions: AiAction[] }>>([]);
+
+  const checkApiHealth = useCallback(async () => {
+    if (isCheckingHealth) return;
+    setIsCheckingHealth(true);
+    try {
+      const ok = await apiClient.health();
+      setApiHealthy(ok);
+      if (!ok) {
+        pushToast('warning', 'Backend unavailable', 'Unable to reach the API. Some features may not work.');
+      }
+    } finally {
+      setIsCheckingHealth(false);
+    }
+  }, [isCheckingHealth, pushToast]);
 
   // Reset processed messages when switching projects
   useEffect(() => {
@@ -160,6 +205,39 @@ const App: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    apiClient.setErrorHandler((error) => {
+      if (error.status === 0) {
+        pushToast('error', 'Network error', error.message);
+        return;
+      }
+      if (error.status === 401) {
+        pushToast('warning', 'Session expired', 'Please log in again.');
+        setIsAuthenticated(false);
+        setCurrentUser(null);
+        setBackendProjects([]);
+        return;
+      }
+      if (error.status >= 500) {
+        pushToast('error', 'Server error', error.message);
+      }
+    });
+
+    return () => apiClient.setErrorHandler(undefined);
+  }, [pushToast]);
+
+  useEffect(() => {
+    localStorage.setItem('cognicraft_require_ai_approval', requireAiApproval ? 'true' : 'false');
+  }, [requireAiApproval]);
+
+  useEffect(() => {
+    if (!isOnline) {
+      setApiHealthy(false);
+      return;
+    }
+    checkApiHealth();
+  }, [isOnline, checkApiHealth]);
+
   // Load project data with backend integration
   const loadProjectData = useCallback(async (projectId: string) => {
     console.log(`[App] Loading data for project: ${projectId}`);
@@ -171,9 +249,56 @@ const App: React.FC = () => {
           const backendProject = backendProjects.find(p => p.id === projectId);
           if (backendProject) {
             console.log('[App] Loading project data from backend');
-            // Load project nodes and edges from backend
-            // For now, fall back to localStorage while we implement this
-            // TODO: Implement backend project data loading
+            try {
+              const remote = await projectService.getProject(projectId);
+              if (remote?.canvas) {
+                const remoteNodes = (remote.canvas.nodes || []).map((node: any) => ({
+                  id: node.id,
+                  x: node.x_position ?? node.x ?? GRID_SIZE * 2,
+                  y: node.y_position ?? node.y ?? GRID_SIZE * 2,
+                  title: node.title || 'New Task',
+                  description: node.description || '',
+                  status: node.status || NodeStatus.ToDo,
+                  width: node.width || NODE_WIDTH,
+                  height: node.height || NODE_HEIGHT,
+                  tags: Array.isArray(node.tags) ? node.tags : [],
+                  iconId: node.icon_id || node.iconId || 'github',
+                  githubIssueUrl: node.github_issue_url || node.githubIssueUrl || undefined,
+                }));
+
+                const remoteEdges = (remote.canvas.edges || []).map((edge: any) => ({
+                  id: edge.id,
+                  sourceId: edge.source_node_id || edge.sourceId,
+                  targetId: edge.target_node_id || edge.targetId,
+                  sourceHandle: edge.source_handle || edge.sourceHandle,
+                  targetHandle: edge.target_handle || edge.targetHandle,
+                }));
+
+                if (remoteNodes.length || remoteEdges.length) {
+                  dispatch({
+                    type: 'INIT_PROJECT_STATE',
+                    payload: {
+                      nodes: remoteNodes,
+                      edges: remoteEdges,
+                      selectedNodeIds: [],
+                      selectedEdgeId: null,
+                      history: [{ nodes: remoteNodes, edges: remoteEdges, selectedNodeIds: [], selectedEdgeId: null }],
+                      historyIndex: 0,
+                    },
+                  });
+                  setChatMessages([{
+                    id: generateId('ai-greet'), sender: 'ai',
+                    text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
+                    timestamp: Date.now()
+                  }]);
+                  setConnectingInfo(null);
+                  if (canvasRef.current) canvasRef.current.fitView(remoteNodes);
+                  return;
+                }
+              }
+            } catch (error) {
+              console.warn('[App] Failed to load project data from backend, falling back to localStorage:', error);
+            }
           }
         } catch (error) {
           console.warn('[App] Failed to load from backend, falling back to localStorage:', error);
@@ -181,7 +306,19 @@ const App: React.FC = () => {
       }
       
       // Load from ProjectRepository (localStorage)
-      const snapshot = projectRepository.loadProjectSnapshot(projectId);
+      let snapshot = projectRepository.loadProjectSnapshot(projectId);
+
+      if (snapshot.hasCorruptData) {
+        pushToast('warning', 'Corrupted local data detected', 'Some saved data could not be loaded.');
+        const shouldReset = window.confirm(
+          'CogniCraft detected corrupted local data for this project. Reset local data and start fresh?'
+        );
+        if (shouldReset) {
+          projectRepository.deleteProjectData(projectId);
+          snapshot = projectRepository.loadProjectSnapshot(projectId);
+          pushToast('info', 'Local data reset', 'Corrupted local project data was cleared.');
+        }
+      }
 
       const initialNodes: NodeData[] = (snapshot.nodes || []).map((node: NodeData) => ({
           ...node,
@@ -252,7 +389,7 @@ const App: React.FC = () => {
       }]);
       setConnectingInfo(null);
     }
-     }, [isAuthenticated, isOnline, backendProjects]);
+     }, [isAuthenticated, isOnline, backendProjects, pushToast]);
 
   // Initialize projects (after authentication is determined)
   useEffect(() => {
@@ -273,6 +410,32 @@ const App: React.FC = () => {
           teamMemberUsernames: Array.isArray(p.teamMemberUsernames) ? p.teamMemberUsernames : []
         }));
       }
+
+      if (isAuthenticated && backendProjects.length > 0) {
+        const backendAsLegacy: LegacyProject[] = backendProjects.map(p => {
+          const teamMembers = Array.isArray(p.team_members)
+            ? p.team_members
+            : (Array.isArray(p.team_member_usernames)
+              ? p.team_member_usernames.map(username => ({ username, role: 'editor' as const }))
+              : []);
+
+          return {
+            id: p.id,
+            name: p.name,
+            ownerUsername: currentUser?.username || 'local',
+            createdAt: p.created_at ? Date.parse(p.created_at) : Date.now(),
+            githubRepoUrl: p.github_repo_url || '',
+            teamMemberUsernames: teamMembers.map(member => member.username),
+            teamMembers,
+          };
+        });
+
+        const merged = new Map<string, LegacyProject>();
+        loadedProjects.forEach(p => merged.set(p.id, p));
+        backendAsLegacy.forEach(p => merged.set(p.id, p));
+        loadedProjects = Array.from(merged.values());
+      }
+
       setProjects(loadedProjects);
 
       // Determine active project
@@ -305,7 +468,7 @@ const App: React.FC = () => {
     };
 
     initializeProjects();
-  }, [isLoading, currentUser?.username, loadProjectData]);
+  }, [isLoading, currentUser?.username, loadProjectData, isAuthenticated, backendProjects]);
 
   // Auto-save project data with backend integration
   useEffect(() => {
@@ -360,7 +523,11 @@ const App: React.FC = () => {
         history,
         historyIndex,
       });
-      projectRepository.flushProjectSaves(currentProjectId);
+      projectRepository.flushProjectSaves(currentProjectId, {
+        isAuthenticated,
+        isOnline,
+        hasBackendProject: !!backendProjects.find(p => p.id === currentProjectId),
+      });
     };
 
     const handleBeforeUnload = () => {
@@ -389,6 +556,9 @@ const App: React.FC = () => {
     selectedEdgeId,
     history,
     historyIndex,
+    isAuthenticated,
+    isOnline,
+    backendProjects,
   ]);
 
   const setNodesInternal = useCallback((updater: StateUpdater<NodeData[]>) => {
@@ -414,6 +584,58 @@ const App: React.FC = () => {
   const commitHistory = useCallback(() => {
     dispatch({ type: 'COMMIT_HISTORY' });
   }, []);
+
+  const copySelectedNodes = useCallback(() => {
+    if (!selectedNodeIds.length) return;
+    const selectedNodes = nodes.filter(node => selectedNodeIds.includes(node.id));
+    const selectedEdges = edges.filter(edge =>
+      selectedNodeIds.includes(edge.sourceId) && selectedNodeIds.includes(edge.targetId)
+    );
+    if (!selectedNodes.length) return;
+    setCopiedNodes(selectedNodes);
+    setCopiedEdges(selectedEdges);
+    setPasteCount(0);
+  }, [edges, nodes, selectedNodeIds]);
+
+  const pasteCopiedNodes = useCallback(() => {
+    if (!copiedNodes || copiedNodes.length === 0) return;
+    const offset = GRID_SIZE * 2 + pasteCount * GRID_SIZE;
+    const idMap = new Map<string, string>();
+
+    const newNodes: NodeData[] = copiedNodes.map(node => {
+      const newId = generateId('node');
+      idMap.set(node.id, newId);
+      return {
+        ...node,
+        id: newId,
+        x: node.x + offset,
+        y: node.y + offset
+      };
+    });
+
+    const newEdges: EdgeData[] = (copiedEdges || [])
+      .map(edge => {
+        const sourceId = idMap.get(edge.sourceId);
+        const targetId = idMap.get(edge.targetId);
+        if (!sourceId || !targetId) return null;
+        return {
+          ...edge,
+          id: generateId('edge'),
+          sourceId,
+          targetId
+        };
+      })
+      .filter(Boolean) as EdgeData[];
+
+    setNodesInternal(prev => [...prev, ...newNodes]);
+    if (newEdges.length) {
+      setEdgesInternal(prev => [...prev, ...newEdges]);
+    }
+    setSelectedNodeIdsInternal(newNodes.map(node => node.id));
+    setSelectedEdgeIdInternal(null);
+    setPasteCount(count => count + 1);
+    commitHistory();
+  }, [copiedEdges, copiedNodes, commitHistory, pasteCount, setEdgesInternal, setNodesInternal, setSelectedEdgeIdInternal, setSelectedNodeIdsInternal]);
 
   const applyOpenClawAction = useCallback((action: { action: string; payload?: any }) => {
     const payload = action.payload || {};
@@ -521,32 +743,69 @@ const App: React.FC = () => {
   const previousProjectIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (previousProjectIdRef.current && previousProjectIdRef.current !== currentProjectId) {
-      projectRepository.flushProjectSaves(previousProjectIdRef.current);
+      projectRepository.flushProjectSaves(previousProjectIdRef.current, {
+        isAuthenticated,
+        isOnline,
+        hasBackendProject: !!backendProjects.find(p => p.id === previousProjectIdRef.current),
+      });
     }
     previousProjectIdRef.current = currentProjectId;
-  }, [currentProjectId]);
+  }, [currentProjectId, isAuthenticated, isOnline, backendProjects]);
 
   useEffect(() => {
     if (!currentProjectId) return;
 
-    const poll = async () => {
-      try {
-        const actions = await openclawService.pollActions(currentProjectId);
-        if (actions.length === 0) return;
-        actions.forEach(action => applyOpenClawAction(action));
-      } catch (error) {
-        console.warn('[OpenClaw] Poll failed:', error);
-      }
+    const addRecent = (action: { action: string; payload?: any }) => {
+      setRecentOpenclawActions(prev => [{ ...action, timestamp: Date.now() }, ...prev].slice(0, 25));
     };
 
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    openclawPollRef.current = interval;
+    const onAction = (action: any) => {
+      applyOpenClawAction(action);
+      addRecent(action);
+    };
+
+    let pollingEnabled = false;
+    try {
+      const socket = openclawService.connectWebSocket(currentProjectId, onAction);
+      openclawSocketRef.current = socket;
+
+      socket.addEventListener('close', () => {
+        if (pollingEnabled) return;
+        pollingEnabled = true;
+        const interval = window.setInterval(async () => {
+          try {
+            const actions = await openclawService.pollActions(currentProjectId);
+            actions.forEach(a => onAction(a));
+          } catch (error) {
+            console.warn('[OpenClaw] Poll failed:', error);
+          }
+        }, 2000);
+        openclawPollRef.current = interval;
+      });
+    } catch {
+      pollingEnabled = true;
+    }
+
+    if (pollingEnabled) {
+      const interval = window.setInterval(async () => {
+        try {
+          const actions = await openclawService.pollActions(currentProjectId);
+          actions.forEach(a => onAction(a));
+        } catch (error) {
+          console.warn('[OpenClaw] Poll failed:', error);
+        }
+      }, 2000);
+      openclawPollRef.current = interval;
+    }
 
     return () => {
       if (openclawPollRef.current) {
         window.clearInterval(openclawPollRef.current);
         openclawPollRef.current = null;
+      }
+      if (openclawSocketRef.current) {
+        openclawSocketRef.current.close();
+        openclawSocketRef.current = null;
       }
     };
   }, [currentProjectId, applyOpenClawAction]);
@@ -556,6 +815,25 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!currentProjectId) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const hasModifier = event.metaKey || event.ctrlKey;
+
+      if (hasModifier && key === 'c') {
+        event.preventDefault();
+        copySelectedNodes();
+        return;
+      }
+
+      if (hasModifier && key === 'v') {
+        event.preventDefault();
+        pasteCopiedNodes();
+        return;
+      }
+
       if (selectedEdgeId && (event.key === 'Delete' || event.key === 'Backspace')) {
         setEdgesInternal(prevEdges => prevEdges.filter(edge => edge.id !== selectedEdgeId));
         setSelectedEdgeIdInternal(null); 
@@ -564,7 +842,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedEdgeId, currentProjectId, commitHistory]);
+  }, [selectedEdgeId, currentProjectId, commitHistory, copySelectedNodes, pasteCopiedNodes, setEdgesInternal, setSelectedEdgeIdInternal]);
 
 
   const calculateNewNodePosition = useCallback((parentNode?: NodeData, existingSubtasks?: NodeData[], specificPoint?: Point) => {
@@ -780,87 +1058,107 @@ const App: React.FC = () => {
     return newSubtaskNode;
   }, [nodes]);
 
+  const applyAiActions = useCallback((actions: AiAction[], projectIdForAction: string | null, messageId: string) => {
+    if (!projectIdForAction) {
+      console.warn('[applyAiActions] No project ID provided');
+      return false;
+    }
+
+    if (processedAiMessageIds.has(messageId)) {
+      console.log('[applyAiActions] Message already processed, skipping:', messageId);
+      return false;
+    }
+
+    let actionsProcessed = false;
+
+    for (const actionData of actions) {
+      if (actionData.action === 'CREATE_NODE') {
+        console.log('[applyAiActions] Processing CREATE_NODE action:', actionData);
+
+        const newNode = handleAddNodeFromAI(
+          actionData.title || 'Untitled Node',
+          actionData.description || '',
+          projectIdForAction,
+          NodeStatus.ToDo,
+          actionData.tags || [],
+          actionData.iconId || 'github',
+          actionData.githubIssueUrl
+        );
+
+        if (newNode) {
+          console.log('[applyAiActions] Successfully created node:', newNode.id);
+          actionsProcessed = true;
+        }
+      } else if (actionData.action === 'CREATE_SUBTASKS') {
+        console.log('[applyAiActions] Processing CREATE_SUBTASKS action:', actionData);
+
+        const parentNode = nodes.find(node =>
+          node.title.toLowerCase() === actionData.parentNodeTitle?.toLowerCase()
+        );
+
+        if (parentNode && actionData.subtasks) {
+          for (const subtask of actionData.subtasks) {
+            const subtaskNode = handleAddSubtaskNode(
+              parentNode.id,
+              subtask.title || 'Untitled Subtask',
+              projectIdForAction,
+              subtask.description || '',
+              subtask.tags || [],
+              subtask.iconId || 'github',
+              subtask.githubIssueUrl
+            );
+
+            if (subtaskNode) {
+              console.log('[applyAiActions] Successfully created subtask:', subtaskNode.id);
+              actionsProcessed = true;
+            }
+          }
+        } else {
+          console.warn('[applyAiActions] Parent node not found for subtasks:', actionData.parentNodeTitle);
+        }
+      }
+    }
+
+    if (actionsProcessed) {
+      commitHistory();
+      console.log('[applyAiActions] Actions processed successfully, history updated');
+    }
+
+    setProcessedAiMessageIds(prev => new Set([...prev, messageId]));
+    console.log('[applyAiActions] Message marked as processed:', messageId);
+
+    return actionsProcessed;
+  }, [handleAddNodeFromAI, handleAddSubtaskNode, nodes, processedAiMessageIds, commitHistory]);
+
   const processAiResponseForAction = useCallback((aiFullText: string, projectIdForAction: string | null, messageId: string) => {
     if (!projectIdForAction) {
       console.warn('[processAiResponseForAction] No project ID provided');
       return false;
     }
 
-    // Check if this message has already been processed
     if (processedAiMessageIds.has(messageId)) {
       console.log('[processAiResponseForAction] Message already processed, skipping:', messageId);
       return false;
     }
 
     console.log('[processAiResponseForAction] Processing AI response for actions...');
-    
-    let actionsProcessed = false;
-    
+
     try {
       const actions = parseAiActionsFromResponse(aiFullText);
 
-      for (const actionData of actions) {
-        if (actionData.action === 'CREATE_NODE') {
-          console.log('[processAiResponseForAction] Processing CREATE_NODE action:', actionData);
-
-          const newNode = handleAddNodeFromAI(
-            actionData.title || 'Untitled Node',
-            actionData.description || '',
-            projectIdForAction,
-            NodeStatus.ToDo,
-            actionData.tags || [],
-            actionData.iconId || 'github',
-            actionData.githubIssueUrl
-          );
-
-          if (newNode) {
-            console.log('[processAiResponseForAction] Successfully created node:', newNode.id);
-            actionsProcessed = true;
-          }
-        } else if (actionData.action === 'CREATE_SUBTASKS') {
-          console.log('[processAiResponseForAction] Processing CREATE_SUBTASKS action:', actionData);
-
-          const parentNode = nodes.find(node =>
-            node.title.toLowerCase() === actionData.parentNodeTitle?.toLowerCase()
-          );
-
-          if (parentNode && actionData.subtasks) {
-            for (const subtask of actionData.subtasks) {
-              const subtaskNode = handleAddSubtaskNode(
-                parentNode.id,
-                subtask.title || 'Untitled Subtask',
-                projectIdForAction,
-                subtask.description || '',
-                subtask.tags || [],
-                subtask.iconId || 'github',
-                subtask.githubIssueUrl
-              );
-
-              if (subtaskNode) {
-                console.log('[processAiResponseForAction] Successfully created subtask:', subtaskNode.id);
-                actionsProcessed = true;
-              }
-            }
-          } else {
-            console.warn('[processAiResponseForAction] Parent node not found for subtasks:', actionData.parentNodeTitle);
-          }
-        }
+      if (requireAiApproval && actions.length > 0) {
+        setPendingAiActions(prev => [...prev, { id: messageId, projectId: projectIdForAction, actions }]);
+        setProcessedAiMessageIds(prev => new Set([...prev, messageId]));
+        pushToast('info', 'AI actions pending approval', 'Review and apply in Settings.');
+        return false;
       }
 
-      if (actionsProcessed) {
-        commitHistory();
-        console.log('[processAiResponseForAction] Actions processed successfully, history updated');
-      }
-
-      setProcessedAiMessageIds(prev => new Set([...prev, messageId]));
-      console.log('[processAiResponseForAction] Message marked as processed:', messageId);
-
+      return applyAiActions(actions, projectIdForAction, messageId);
     } catch (error) {
       console.error('[processAiResponseForAction] Error processing AI response:', error);
+      return false;
     }
-
-    return actionsProcessed;
-  }, [handleAddNodeFromAI, handleAddSubtaskNode, nodes, processedAiMessageIds, commitHistory]);
+  }, [applyAiActions, processedAiMessageIds, requireAiApproval, pushToast]);
 
   const handleSendChatMessage = useCallback(async (message: string) => {
     if (!currentProjectId || !message.trim()) return;
@@ -896,9 +1194,12 @@ const App: React.FC = () => {
     try {
       let fullResponseText = '';
       
-      // For now, use the existing Gemini service with proper callbacks
-      await sendMessageToChatStream(
-        message,
+      const chatPrompt = buildChatPrompt(message);
+      const outgoingMessage = aiProvider.id === 'local' ? message : chatPrompt;
+
+      // For now, use the existing AI provider with proper callbacks
+      await aiProvider.sendMessageToChatStream(
+        outgoingMessage,
         // onChunk callback - updates the AI message with streaming content
         (chunkText: string, isFinalChunk: boolean) => {
           if (!isFinalChunk && chunkText) {
@@ -970,6 +1271,15 @@ const App: React.FC = () => {
     setCurrentAiMessageId(null);
   }, [currentProjectId, processAiResponseForAction]);
 
+  const applyPendingAiActions = useCallback((pendingId: string) => {
+    const pending = pendingAiActions.find(item => item.id === pendingId);
+    if (!pending) return;
+    const applied = applyAiActions(pending.actions, pending.projectId, pending.id);
+    if (applied) {
+      setPendingAiActions(prev => prev.filter(item => item.id !== pendingId));
+    }
+  }, [pendingAiActions, applyAiActions]);
+
   const handleResetChat = useCallback(() => {
     if (!currentProjectId) return;
     if (window.confirm('Are you sure you want to reset the chat? This will clear all conversation history.')) {
@@ -981,7 +1291,7 @@ const App: React.FC = () => {
         text: "Hello! I'm your AI planning assistant. How can I help you structure your project today?",
         timestamp: Date.now()
       }]);
-      resetGeminiChatHistory();
+      aiProvider.resetChatHistory();
     }
   }, [currentProjectId]);
 
@@ -1101,8 +1411,19 @@ const App: React.FC = () => {
     loadProjectData(projectId);
   }, [currentProjectId, loadProjectData]);
 
-  const handleDeleteProject = useCallback((projectId: string) => {
+  const handleDeleteProject = useCallback(async (projectId: string) => {
     if (window.confirm(`Are you sure you want to delete project "${projects.find(p=>p.id === projectId)?.name}"? This action cannot be undone.`)) {
+        if (isAuthenticated && isOnline && backendProjects.find(p => p.id === projectId)) {
+          try {
+            await projectService.deleteProject(projectId);
+            setBackendProjects(prev => prev.filter(p => p.id !== projectId));
+          } catch (error) {
+            console.error('[App] Failed to delete backend project:', error);
+            pushToast('error', 'Delete failed', 'Unable to delete the project from the server.');
+            return;
+          }
+        }
+
         const remainingProjects = projects.filter(p => p.id !== projectId);
         setProjects(remainingProjects);
         
@@ -1122,19 +1443,46 @@ const App: React.FC = () => {
             }
         }
     }
-  }, [projects, currentProjectId, currentUser, loadProjectData, commitHistory]);
+  }, [projects, currentProjectId, currentUser, loadProjectData, commitHistory, isAuthenticated, isOnline, backendProjects, pushToast]);
 
-  const handleUpdateProjectDetails = useCallback((projectId: string, updates: Partial<Pick<LegacyProject, 'name' | 'githubRepoUrl' | 'teamMemberUsernames'>>) => {
+  const handleUpdateProjectDetails = useCallback(async (projectId: string, updates: Partial<Pick<LegacyProject, 'name' | 'githubRepoUrl' | 'teamMemberUsernames' | 'teamMembers'>>) => {
     setProjects(prevProjects => 
       prevProjects.map(p => 
         p.id === projectId ? { ...p, ...updates } : p
       )
     );
-  }, []);
+
+    if (updates.teamMembers && !updates.teamMemberUsernames) {
+      const usernames = updates.teamMembers.map(member => member.username);
+      setProjects(prevProjects => 
+        prevProjects.map(p => 
+          p.id === projectId ? { ...p, teamMemberUsernames: usernames } : p
+        )
+      );
+    }
+
+    if (isAuthenticated && isOnline && backendProjects.find(p => p.id === projectId)) {
+      try {
+        const payload = {
+          name: updates.name,
+          github_repo_url: updates.githubRepoUrl,
+          team_member_usernames: updates.teamMemberUsernames,
+          team_members: updates.teamMembers,
+        };
+        const updated = await projectService.updateProject(projectId, payload);
+        setBackendProjects(prev => prev.map(p => p.id === projectId ? updated : p));
+      } catch (error) {
+        console.error('[App] Failed to update backend project:', error);
+        pushToast('error', 'Update failed', 'Unable to update the project on the server.');
+      }
+    }
+  }, [isAuthenticated, isOnline, backendProjects, pushToast]);
 
   const currentProject = projects.find(p => p.id === currentProjectId);
   const currentProjectName = currentProject?.name || "";
-  const currentProjectTeamAvatars = (currentProject?.teamMemberUsernames || [])
+  const currentProjectTeamAvatars = (currentProject?.teamMembers?.length
+    ? currentProject.teamMembers.map(member => member.username)
+    : (currentProject?.teamMemberUsernames || []))
     .slice(0, 4) 
     .map(username => `https://github.com/${username.trim()}.png`);
   
@@ -1186,7 +1534,7 @@ const App: React.FC = () => {
   }, [currentProjectId, setSelectedEdgeIdInternal]);
 
   const handleOpenContextMenu = useCallback((clientX: number, clientY: number, svgX: number, svgY: number) => {
-    setContextMenuState({ clientX, clientY, svgX, svgY });
+    setContextMenuState({ clientX, clientY, svgX, svgY, kind: 'canvas' });
   }, []);
 
   const handleCloseContextMenu = useCallback(() => {
@@ -1194,15 +1542,65 @@ const App: React.FC = () => {
   }, []);
 
   const handleContextMenuCreateNode = useCallback(() => {
-    if (contextMenuState) {
+    if (contextMenuState?.kind === 'canvas' && contextMenuState.svgX !== undefined && contextMenuState.svgY !== undefined) {
       createNodeAtPosition({ x: contextMenuState.svgX, y: contextMenuState.svgY });
     }
     handleCloseContextMenu();
   }, [contextMenuState, createNodeAtPosition, handleCloseContextMenu]);
 
+  const handleOpenEdgeContextMenu = useCallback((clientX: number, clientY: number, edgeId: string) => {
+    setContextMenuState({ clientX, clientY, kind: 'edge', edgeId });
+  }, []);
+
+  const handleContextMenuDeleteEdge = useCallback(() => {
+    if (contextMenuState?.kind !== 'edge' || !contextMenuState.edgeId) return;
+    setEdgesInternal(prevEdges => prevEdges.filter(edge => edge.id !== contextMenuState.edgeId));
+    setSelectedEdgeIdInternal(null);
+    commitHistory();
+    handleCloseContextMenu();
+  }, [contextMenuState, setEdgesInternal, setSelectedEdgeIdInternal, commitHistory, handleCloseContextMenu]);
+
+  const showOfflineBanner = !isOnline || !apiHealthy;
+  const offlineMessage = !isOnline
+    ? 'You are offline. Local changes will be saved and synced later.'
+    : 'Backend is unreachable. Some features may be unavailable.';
+
+  const filteredNodes = useMemo(() => {
+    const query = nodeSearchQuery.trim().toLowerCase();
+    if (!query) return nodes;
+    return nodes.filter(node => {
+      const haystack = [
+        node.title,
+        node.description,
+        ...(node.tags || [])
+      ].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [nodeSearchQuery, nodes]);
+
+  const filteredNodeIds = useMemo(() => new Set(filteredNodes.map(node => node.id)), [filteredNodes]);
+
+  const filteredEdges = useMemo(() => {
+    if (!nodeSearchQuery.trim()) return edges;
+    return edges.filter(edge => filteredNodeIds.has(edge.sourceId) && filteredNodeIds.has(edge.targetId));
+  }, [edges, filteredNodeIds, nodeSearchQuery]);
 
   return (
-    <MainLayout
+    <>
+      {showOfflineBanner && (
+        <div className="fixed top-0 left-0 right-0 z-40 bg-amber-900/80 text-amber-100 text-sm px-4 py-2 flex items-center justify-between border-b border-amber-500/40">
+          <span>{offlineMessage}</span>
+          <button
+            onClick={checkApiHealth}
+            disabled={isCheckingHealth}
+            className="text-xs px-3 py-1 rounded bg-amber-700/80 hover:bg-amber-600/80 disabled:opacity-60"
+          >
+            {isCheckingHealth ? 'Checking…' : 'Retry'}
+          </button>
+        </div>
+      )}
+      <div className={showOfflineBanner ? 'pt-10' : ''}>
+      <MainLayout
       header={
         <Header
           onCreateNode={manuallyAddNode}
@@ -1212,6 +1610,8 @@ const App: React.FC = () => {
           currentProjectName={currentProjectName}
           currentProjectRepoUrl={currentProject?.githubRepoUrl}
           currentProjectTeamAvatars={currentProjectTeamAvatars}
+          nodeSearchQuery={nodeSearchQuery}
+          onNodeSearchChange={setNodeSearchQuery}
         />
       }
       left={
@@ -1233,8 +1633,8 @@ const App: React.FC = () => {
           {currentProjectId ? (
             <NodePlannerCanvas
               ref={canvasRef}
-              nodes={nodes}
-              edges={edges}
+              nodes={filteredNodes}
+              edges={filteredEdges}
               setNodes={setNodesFromCanvas}
               setEdges={setEdgesFromCanvas}
               selectedNodeIds={selectedNodeIds}
@@ -1247,6 +1647,7 @@ const App: React.FC = () => {
               onInteractionEnd={handleInteractionEnd}
               onCanvasDoubleClick={createNodeAtPosition}
               onCanvasContextMenu={handleOpenContextMenu}
+              onEdgeContextMenu={handleOpenEdgeContextMenu}
             />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-dark-text-secondary">
@@ -1312,6 +1713,11 @@ const App: React.FC = () => {
           onUpdateProjectDetails={handleUpdateProjectDetails}
           onExportMarkdown={handleExportMarkdown}
           currentNodesCount={nodes.length}
+          recentOpenclawActions={recentOpenclawActions}
+          requireAiApproval={requireAiApproval}
+          onToggleAiApproval={setRequireAiApproval}
+          pendingAiActions={pendingAiActions}
+          onApplyPendingAiAction={applyPendingAiActions}
         />
       }
       contextMenu={
@@ -1320,11 +1726,17 @@ const App: React.FC = () => {
             clientX={contextMenuState.clientX}
             clientY={contextMenuState.clientY}
             onClose={handleCloseContextMenu}
-            onCreateNodeAtPosition={handleContextMenuCreateNode}
+            onCreateNodeAtPosition={contextMenuState.kind === 'canvas' ? handleContextMenuCreateNode : undefined}
+            onCopyNodes={contextMenuState.kind === 'canvas' && selectedNodeIds.length > 0 ? copySelectedNodes : undefined}
+            onPasteNodes={contextMenuState.kind === 'canvas' && copiedNodes?.length ? pasteCopiedNodes : undefined}
+            onDeleteEdge={contextMenuState.kind === 'edge' ? handleContextMenuDeleteEdge : undefined}
           />
         ) : null
       }
     />
+      </div>
+      <Toast toasts={toasts} onDismiss={dismissToast} />
+    </>
   );
 };
 

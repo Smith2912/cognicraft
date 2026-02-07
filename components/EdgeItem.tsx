@@ -10,6 +10,7 @@ interface EdgeItemProps {
   targetHandlePosition?: 'top' | 'bottom' | 'left' | 'right';
   isSelected: boolean; 
   onEdgeClick: (edgeId: string) => void;
+  onEdgeContextMenu?: (edgeId: string, clientX: number, clientY: number) => void;
 }
 
 const getHandlePosition = (node: NodeData, position?: 'top' | 'bottom' | 'left' | 'right'): Point => {
@@ -33,7 +34,8 @@ const EdgeItem = ({
     sourceHandlePosition, 
     targetHandlePosition,
     isSelected,
-    onEdgeClick
+    onEdgeClick,
+    onEdgeContextMenu
 }: EdgeItemProps): JSX.Element => {
   const p1 = getHandlePosition(sourceNode, sourceHandlePosition);
   const p2 = getHandlePosition(targetNode, targetHandlePosition);
@@ -47,6 +49,13 @@ const EdgeItem = ({
     onEdgeClick(id); 
   };
 
+  const handleContextMenu = (e: React.MouseEvent<SVGPathElement>) => {
+    if (!onEdgeContextMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onEdgeContextMenu(id, e.clientX, e.clientY);
+  };
+
   return (
     <path
       d={pathData}
@@ -55,6 +64,7 @@ const EdgeItem = ({
       fill="none"
       markerEnd="url(#arrowhead)"
       onMouseDown={handleMouseDown}
+      onContextMenu={handleContextMenu}
       style={{ cursor: 'pointer' }}
       aria-label={`Connection from ${sourceNode.title} to ${targetNode.title}${isSelected ? ' (Selected)' : ''}`}
     />

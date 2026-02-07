@@ -9,17 +9,28 @@ export interface OpenClawAction {
 }
 
 class OpenClawService {
+  private getToken(): string | undefined {
+    const token = import.meta.env.VITE_OPENCLAW_TOKEN as string | undefined;
+    return token && token.trim().length > 0 ? token.trim() : undefined;
+  }
+
+  private buildHeaders() {
+    const token = this.getToken();
+    return token ? { 'X-OpenClaw-Token': token } : undefined;
+  }
+
   async enqueueAction(action: OpenClawAction): Promise<void> {
-    await apiClient.post('/api/v1/openclaw/queue', action);
+    await apiClient.post('/api/v1/openclaw/queue', action, { headers: this.buildHeaders() });
   }
 
   async enqueueBulk(projectId: string, actions: OpenClawAction[]): Promise<void> {
-    await apiClient.post('/api/v1/openclaw/bulk', { projectId, actions });
+    await apiClient.post('/api/v1/openclaw/bulk', { projectId, actions }, { headers: this.buildHeaders() });
   }
 
   async pollActions(projectId: string): Promise<OpenClawAction[]> {
     const response: ApiResponse<{ actions: OpenClawAction[] }> = await apiClient.get(
-      `/api/v1/openclaw/poll?projectId=${encodeURIComponent(projectId)}`
+      `/api/v1/openclaw/poll?projectId=${encodeURIComponent(projectId)}`,
+      { headers: this.buildHeaders() }
     );
     return response.data.actions || [];
   }
@@ -27,6 +38,8 @@ class OpenClawService {
   connectWebSocket(projectId: string, onAction: (action: OpenClawAction) => void): WebSocket {
     const url = new URL('/api/v1/openclaw/ws', window.location.origin);
     url.searchParams.set('projectId', projectId);
+    const token = this.getToken();
+    if (token) url.searchParams.set('token', token);
     const ws = new WebSocket(url.toString().replace('http', 'ws'));
 
     ws.addEventListener('message', (event) => {

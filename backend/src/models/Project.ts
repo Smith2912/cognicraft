@@ -7,6 +7,8 @@ export class Project extends Model<InferAttributes<Project>, InferCreationAttrib
   declare name: string;
   declare owner_user_id: ForeignKey<User['id']>;
   declare github_repo_url: CreationOptional<string>;
+  declare team_member_usernames: CreationOptional<string[]>;
+  declare team_members: CreationOptional<Array<{ username: string; role: 'editor' | 'viewer' }>>;
   declare created_at: CreationOptional<Date>;
   declare updated_at: CreationOptional<Date>;
 
@@ -42,6 +44,16 @@ Project.init({
     validate: {
       isUrl: true
     }
+  },
+  team_member_usernames: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: [],
+  },
+  team_members: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: [],
   },
   created_at: {
     type: DataTypes.DATE,

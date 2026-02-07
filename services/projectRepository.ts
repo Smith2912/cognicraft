@@ -16,6 +16,8 @@ export interface ProjectSnapshot {
   selectedEdgeId: string | null;
   history: HistoryState[];
   historyIndex: number;
+  hasCorruptData?: boolean;
+  corruptKeys?: string[];
 }
 
 export interface BackendSaveContext {
@@ -29,9 +31,11 @@ class ProjectRepository {
   private backendSaveTimers = new Map<string, number>();
   private pendingSnapshots = new Map<string, ProjectSnapshot>();
   private pendingCanvas = new Map<string, Pick<ProjectSnapshot, 'nodes' | 'edges' | 'selectedNodeIds' | 'selectedEdgeId'>>();
+  private lastLocalHash = new Map<string, string>();
+  private lastBackendHash = new Map<string, string>();
 
-  private localDebounceMs = 250;
-  private backendDebounceMs = 1200;
+  private localDebounceMs = 400;
+  private backendDebounceMs = 1500;
 
   public getProjectScopedKey(baseKey: string, projectId: string): string {
     return `${baseKey}_${projectId}`;
@@ -46,26 +50,28 @@ class ProjectRepository {
     const historyKey = this.getProjectScopedKey('plannerHistory', projectId);
     const historyIndexKey = this.getProjectScopedKey('plannerHistoryIndex', projectId);
 
-    const nodes: NodeData[] = localStorage.getItem(nodesKey)
-      ? JSON.parse(localStorage.getItem(nodesKey)!)
-      : [];
-    const edges: EdgeData[] = localStorage.getItem(edgesKey)
-      ? JSON.parse(localStorage.getItem(edgesKey)!)
-      : [];
-    const chatMessages: UiChatMessage[] = localStorage.getItem(chatKey)
-      ? JSON.parse(localStorage.getItem(chatKey)!)
-      : [];
-    const selectedNodeIds: string[] = localStorage.getItem(selectedNodesKey)
-      ? JSON.parse(localStorage.getItem(selectedNodesKey)!)
-      : [];
-    const selectedEdgeId: string | null = localStorage.getItem(selectedEdgeKey)
-      ? JSON.parse(localStorage.getItem(selectedEdgeKey)!)
-      : null;
-    const history: HistoryState[] = localStorage.getItem(historyKey)
-      ? JSON.parse(localStorage.getItem(historyKey)!)
-      : [];
+    const corruptKeys: string[] = [];
+
+    const safeParse = <T>(key: string, fallback: T): T => {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      try {
+        return JSON.parse(raw) as T;
+      } catch {
+        corruptKeys.push(key);
+        return fallback;
+      }
+    };
+
+    const nodes = safeParse<NodeData[]>(nodesKey, []).filter(Boolean);
+    const edges = safeParse<EdgeData[]>(edgesKey, []).filter(Boolean);
+    const chatMessages = safeParse<UiChatMessage[]>(chatKey, []).filter(Boolean);
+    const selectedNodeIds = safeParse<string[]>(selectedNodesKey, []).filter(Boolean);
+    const selectedEdgeId = safeParse<string | null>(selectedEdgeKey, null);
+    const history = safeParse<HistoryState[]>(historyKey, []).filter(Boolean);
     const historyIndexRaw = localStorage.getItem(historyIndexKey);
-    const historyIndex = historyIndexRaw ? parseInt(historyIndexRaw, 10) : history.length - 1;
+    const parsedIndex = historyIndexRaw ? parseInt(historyIndexRaw, 10) : history.length - 1;
+    const historyIndex = Number.isFinite(parsedIndex) ? parsedIndex : history.length - 1;
 
     return {
       nodes,
@@ -75,10 +81,34 @@ class ProjectRepository {
       selectedEdgeId,
       history,
       historyIndex,
+      hasCorruptData: corruptKeys.length > 0,
+      corruptKeys,
     };
   }
 
+  private hashSnapshot(snapshot: ProjectSnapshot): string {
+    return JSON.stringify({
+      nodes: snapshot.nodes,
+      edges: snapshot.edges,
+      selectedNodeIds: snapshot.selectedNodeIds,
+      selectedEdgeId: snapshot.selectedEdgeId,
+      historyIndex: snapshot.historyIndex,
+    });
+  }
+
+  private hashCanvas(snapshot: Pick<ProjectSnapshot, 'nodes' | 'edges' | 'selectedNodeIds' | 'selectedEdgeId'>): string {
+    return JSON.stringify({
+      nodes: snapshot.nodes,
+      edges: snapshot.edges,
+      selectedNodeIds: snapshot.selectedNodeIds,
+      selectedEdgeId: snapshot.selectedEdgeId,
+    });
+  }
+
   public saveProjectSnapshotDebounced(projectId: string, snapshot: ProjectSnapshot): void {
+    const hash = this.hashSnapshot(snapshot);
+    if (this.lastLocalHash.get(projectId) === hash) return;
+
     this.pendingSnapshots.set(projectId, snapshot);
 
     if (this.localSaveTimers.has(projectId)) {
@@ -90,6 +120,7 @@ class ProjectRepository {
       if (!pending) return;
 
       this.saveProjectSnapshot(projectId, pending);
+      this.lastLocalHash.set(projectId, this.hashSnapshot(pending));
       this.pendingSnapshots.delete(projectId);
       this.localSaveTimers.delete(projectId);
     }, this.localDebounceMs);
@@ -114,6 +145,9 @@ class ProjectRepository {
   ): void {
     if (!context.isAuthenticated || !context.isOnline || !context.hasBackendProject) return;
 
+    const hash = this.hashCanvas(canvasState);
+    if (this.lastBackendHash.get(projectId) === hash) return;
+
     this.pendingCanvas.set(projectId, canvasState);
 
     if (this.backendSaveTimers.has(projectId)) {
@@ -131,6 +165,7 @@ class ProjectRepository {
           selected_node_ids: pending.selectedNodeIds,
           selected_edge_id: pending.selectedEdgeId ?? undefined,
         });
+        this.lastBackendHash.set(projectId, this.hashCanvas(pending));
       } catch (error) {
         console.error('[ProjectRepository] Failed to save canvas to backend:', error);
       } finally {
@@ -142,13 +177,14 @@ class ProjectRepository {
     this.backendSaveTimers.set(projectId, timer);
   }
 
-  public flushProjectSaves(projectId: string): void {
+  public flushProjectSaves(projectId: string, context?: BackendSaveContext): void {
     if (this.localSaveTimers.has(projectId)) {
       window.clearTimeout(this.localSaveTimers.get(projectId));
       this.localSaveTimers.delete(projectId);
       const pendingSnapshot = this.pendingSnapshots.get(projectId);
       if (pendingSnapshot) {
         this.saveProjectSnapshot(projectId, pendingSnapshot);
+        this.lastLocalHash.set(projectId, this.hashSnapshot(pendingSnapshot));
         this.pendingSnapshots.delete(projectId);
       }
     }
@@ -156,6 +192,21 @@ class ProjectRepository {
     if (this.backendSaveTimers.has(projectId)) {
       window.clearTimeout(this.backendSaveTimers.get(projectId));
       this.backendSaveTimers.delete(projectId);
+
+      const pendingCanvas = this.pendingCanvas.get(projectId);
+      if (pendingCanvas && context?.isAuthenticated && context?.isOnline && context?.hasBackendProject) {
+        projectService.saveCanvasState(projectId, {
+          nodes: pendingCanvas.nodes,
+          edges: pendingCanvas.edges,
+          selected_node_ids: pendingCanvas.selectedNodeIds,
+          selected_edge_id: pendingCanvas.selectedEdgeId ?? undefined,
+        }).then(() => {
+          this.lastBackendHash.set(projectId, this.hashCanvas(pendingCanvas));
+        }).catch(error => {
+          console.error('[ProjectRepository] Failed to flush backend canvas:', error);
+        });
+      }
+      this.pendingCanvas.delete(projectId);
     }
   }
 
@@ -173,6 +224,11 @@ class ProjectRepository {
     keysToRemove.forEach(baseKey => {
       localStorage.removeItem(this.getProjectScopedKey(baseKey, projectId));
     });
+
+    this.pendingSnapshots.delete(projectId);
+    this.pendingCanvas.delete(projectId);
+    this.lastLocalHash.delete(projectId);
+    this.lastBackendHash.delete(projectId);
   }
 
   public loadProjects(): LegacyProject[] {

@@ -10,6 +10,8 @@ interface HeaderProps {
   currentProjectName?: string;
   currentProjectRepoUrl?: string;
   currentProjectTeamAvatars?: string[];
+  nodeSearchQuery?: string;
+  onNodeSearchChange?: (value: string) => void;
 }
 
 const Header: React.FC<HeaderProps> = ({
@@ -20,6 +22,8 @@ const Header: React.FC<HeaderProps> = ({
   currentProjectName,
   currentProjectRepoUrl,
   currentProjectTeamAvatars = [],
+  nodeSearchQuery = '',
+  onNodeSearchChange,
 }) => {
   const iconButtonClass = "p-2 rounded-md text-dark-text-secondary hover:text-dark-text-primary hover:bg-dark-card transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-dark-accent focus:ring-offset-2 focus:ring-offset-dark-bg";
 
@@ -49,7 +53,20 @@ const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      <div className="flex-1 min-w-0"></div>
+      <div className="flex-1 min-w-0 px-4">
+        {onNodeSearchChange && (
+          <div className="max-w-md w-full">
+            <input
+              type="text"
+              value={nodeSearchQuery}
+              onChange={(e) => onNodeSearchChange(e.target.value)}
+              placeholder="Search nodes..."
+              className="w-full px-3 py-2 text-sm rounded-md bg-dark-card border border-dark-border text-dark-text-primary placeholder-dark-text-secondary focus:outline-none focus:ring-2 focus:ring-dark-accent"
+              aria-label="Search nodes"
+            />
+          </div>
+        )}
+      </div>
 
       <div className="flex items-center space-x-2 flex-shrink-0">
         {currentProjectTeamAvatars.length > 0 && (

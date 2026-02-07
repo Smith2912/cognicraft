@@ -1,12 +1,15 @@
 
 import React, { useEffect, useRef } from 'react';
-import { MousePointerClickIcon, PlusIcon } from './icons'; // Assuming PlusIcon for general add
+import { MousePointerClickIcon } from './icons';
 
 interface ContextMenuProps {
   clientX: number;
   clientY: number;
   onClose: () => void;
-  onCreateNodeAtPosition: () => void; // Will use stored SVG coords from App state
+  onCreateNodeAtPosition?: () => void; // Will use stored SVG coords from App state
+  onDeleteEdge?: () => void;
+  onCopyNodes?: () => void;
+  onPasteNodes?: () => void;
 }
 
 const ContextMenu: React.FC<ContextMenuProps> = ({
@@ -14,6 +17,9 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
   clientY,
   onClose,
   onCreateNodeAtPosition,
+  onDeleteEdge,
+  onCopyNodes,
+  onPasteNodes,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -38,7 +44,30 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
   }, [onClose]);
 
   const handleCreateNode = () => {
-    onCreateNodeAtPosition();
+    if (onCreateNodeAtPosition) {
+      onCreateNodeAtPosition();
+    }
+    onClose();
+  };
+
+  const handleDeleteEdge = () => {
+    if (onDeleteEdge) {
+      onDeleteEdge();
+    }
+    onClose();
+  };
+
+  const handleCopyNodes = () => {
+    if (onCopyNodes) {
+      onCopyNodes();
+    }
+    onClose();
+  };
+
+  const handlePasteNodes = () => {
+    if (onPasteNodes) {
+      onPasteNodes();
+    }
     onClose();
   };
 
@@ -55,14 +84,46 @@ const ContextMenu: React.FC<ContextMenuProps> = ({
       aria-labelledby="options-menu"
     >
       <ul>
-        <li
-          onClick={handleCreateNode}
-          className="px-3 py-1.5 hover:bg-dark-accent hover:text-white flex items-center space-x-2 cursor-pointer"
-          role="menuitem"
-        >
-          <MousePointerClickIcon className="w-4 h-4" />
-          <span>Create Node Here</span>
-        </li>
+        {onCreateNodeAtPosition && (
+          <li
+            onClick={handleCreateNode}
+            className="px-3 py-1.5 hover:bg-dark-accent hover:text-white flex items-center space-x-2 cursor-pointer"
+            role="menuitem"
+          >
+            <MousePointerClickIcon className="w-4 h-4" />
+            <span>Create Node Here</span>
+          </li>
+        )}
+        {onCopyNodes && (
+          <li
+            onClick={handleCopyNodes}
+            className="px-3 py-1.5 hover:bg-dark-accent hover:text-white flex items-center space-x-2 cursor-pointer"
+            role="menuitem"
+          >
+            <span className="w-4 h-4 flex items-center justify-center">⧉</span>
+            <span>Copy Node(s)</span>
+          </li>
+        )}
+        {onPasteNodes && (
+          <li
+            onClick={handlePasteNodes}
+            className="px-3 py-1.5 hover:bg-dark-accent hover:text-white flex items-center space-x-2 cursor-pointer"
+            role="menuitem"
+          >
+            <span className="w-4 h-4 flex items-center justify-center">📋</span>
+            <span>Paste Node(s)</span>
+          </li>
+        )}
+        {onDeleteEdge && (
+          <li
+            onClick={handleDeleteEdge}
+            className="px-3 py-1.5 hover:bg-red-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+            role="menuitem"
+          >
+            <span className="w-4 h-4 flex items-center justify-center">✕</span>
+            <span>Delete Edge</span>
+          </li>
+        )}
         {/* Future actions can be added here */}
         {/* <li className="px-3 py-1.5 hover:bg-dark-accent hover:text-white flex items-center space-x-2 cursor-pointer">
           <PasteIcon className="w-4 h-4" /> 

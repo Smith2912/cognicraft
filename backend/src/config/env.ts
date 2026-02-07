@@ -40,6 +40,10 @@ export const config = {
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
   RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),
 
+  // OpenClaw Security
+  OPENCLAW_TOKEN: process.env.OPENCLAW_TOKEN || '',
+  OPENCLAW_ALLOW_REMOTE: process.env.OPENCLAW_ALLOW_REMOTE === 'true',
+
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 };

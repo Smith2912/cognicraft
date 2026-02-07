@@ -21,15 +21,6 @@ export const NODE_STATUS_BORDER_COLORS: { [key: string]: string } = {
   [NodeStatus.Blocked]: 'rgb(248 113 113)',
 };
 
-export const DEFAULT_NODE_DESCRIPTION_PROMPT = (title: string): string => 
-  `Generate a concise, actionable description for a software development task titled "${title}". Focus on key objectives and potential considerations. Maximum 3-4 sentences.`;
-
-export const DEFAULT_SUBTASK_PROMPT = (title: string, description: string): string =>
-  `Given a primary software development task:
-Title: "${title}"
-Description: "${description}"
-Suggest 3 to 5 potential sub-tasks or actionable steps to accomplish this primary task. List each sub-task on a new line. Do not add any prefix like '-' or numbers. Just list the tasks.`;
-
 // Constants for zoom functionality
 export const INITIAL_VIEWBOX_WIDTH = 2000;
 export const INITIAL_VIEWBOX_HEIGHT = 1500;

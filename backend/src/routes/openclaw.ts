@@ -3,19 +3,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { Node, Edge } from '../models/index.js';
 import { NodeStatus } from '../models/Node.js';
 import { broadcastAction } from '../services/openclawHub.js';
+import { requireOpenClawAuth } from '../middleware/openclawAuth.js';
 
 const router = express.Router();
 
 const actionQueue = new Map<string, any[]>();
-
-const requireTokenIfSet = (req: express.Request, res: express.Response): boolean => {
-  const token = process.env.OPENCLAW_TOKEN;
-  if (!token) return true;
-  const headerToken = req.header('X-OpenClaw-Token');
-  if (headerToken && headerToken === token) return true;
-  res.status(401).json({ error: 'Unauthorized', message: 'Invalid OpenClaw token' });
-  return false;
-};
 
 const enqueue = (projectId: string, action: any) => {
   const queue = actionQueue.get(projectId) || [];
@@ -23,8 +15,7 @@ const enqueue = (projectId: string, action: any) => {
   actionQueue.set(projectId, queue);
 };
 
-router.post('/queue', async (req, res) => {
-  if (!requireTokenIfSet(req, res)) return;
+router.post('/queue', requireOpenClawAuth, async (req, res) => {
 
   const { projectId, action, payload } = req.body || {};
   if (!projectId || !action) {
@@ -37,8 +28,7 @@ router.post('/queue', async (req, res) => {
   return res.json({ success: true });
 });
 
-router.post('/bulk', async (req, res) => {
-  if (!requireTokenIfSet(req, res)) return;
+router.post('/bulk', requireOpenClawAuth, async (req, res) => {
 
   const { projectId, actions } = req.body || {};
   if (!projectId || !Array.isArray(actions)) {
@@ -54,8 +44,7 @@ router.post('/bulk', async (req, res) => {
   return res.json({ success: true, queued: actions.length });
 });
 
-router.get('/poll', async (req, res) => {
-  if (!requireTokenIfSet(req, res)) return;
+router.get('/poll', requireOpenClawAuth, async (req, res) => {
 
   const projectId = req.query.projectId as string | undefined;
   if (!projectId) {
@@ -67,8 +56,7 @@ router.get('/poll', async (req, res) => {
   return res.json({ actions: queue });
 });
 
-router.post('/action', async (req, res) => {
-  if (!requireTokenIfSet(req, res)) return;
+router.post('/action', requireOpenClawAuth, async (req, res) => {
 
   const { projectId, action, payload } = req.body || {};
   if (!projectId || !action) {

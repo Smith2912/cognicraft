@@ -15,6 +15,7 @@ export interface ApiError {
 
 class ApiClient {
   private client: AxiosInstance;
+  private errorHandler?: (error: ApiError) => void;
 
   constructor() {
     this.client = axios.create({
@@ -44,11 +45,18 @@ class ApiClient {
         if (error.response?.status === 401) {
           // Token expired or invalid
           this.clearAuth();
-          window.location.href = '/'; // Redirect to home
         }
-        return Promise.reject(this.formatError(error));
+        const formatted = this.formatError(error);
+        if (this.errorHandler) {
+          this.errorHandler(formatted);
+        }
+        return Promise.reject(formatted);
       }
     );
+  }
+
+  public setErrorHandler(handler?: (error: ApiError) => void): void {
+    this.errorHandler = handler;
   }
 
   private formatError(error: any): ApiError {

@@ -6,6 +6,8 @@ export interface Project {
   id: string;
   name: string;
   github_repo_url?: string;
+  team_member_usernames?: string[];
+  team_members?: Array<{ username: string; role: 'editor' | 'viewer' }>;
   owner_user_id: string;
   created_at: string;
   updated_at: string;
@@ -37,12 +39,14 @@ export interface CreateProjectRequest {
   name: string;
   github_repo_url?: string;
   team_member_usernames?: string[];
+  team_members?: Array<{ username: string; role: 'editor' | 'viewer' }>;
 }
 
 export interface UpdateProjectRequest {
   name?: string;
   github_repo_url?: string;
   team_member_usernames?: string[];
+  team_members?: Array<{ username: string; role: 'editor' | 'viewer' }>;
 }
 
 export interface CanvasState {
@@ -62,8 +66,8 @@ class ProjectService {
   }
 
   // Get specific project with canvas data
-  public async getProject(projectId: string): Promise<ProjectWithCanvas> {
-    const response: ApiResponse<ProjectWithCanvas> = await apiClient.get(
+  public async getProject(projectId: string): Promise<{ project: Project; canvas: { nodes: NodeData[]; edges: EdgeData[] } }> {
+    const response: ApiResponse<{ project: Project; canvas: { nodes: NodeData[]; edges: EdgeData[] } }> = await apiClient.get(
       buildUrl(API_CONFIG.ENDPOINTS.PROJECT_DETAIL, { id: projectId })
     );
     return response.data;

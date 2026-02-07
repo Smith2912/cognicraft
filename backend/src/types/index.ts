@@ -125,6 +125,7 @@ export interface ProjectRequest {
   name: string;
   github_repo_url?: string;
   team_member_usernames?: string[];
+  team_members?: Array<{ username: string; role: 'editor' | 'viewer' }>;
 }
 
 export interface ProjectResponse {
@@ -132,6 +133,8 @@ export interface ProjectResponse {
   name: string;
   owner_user_id: string;
   github_repo_url?: string;
+  team_member_usernames?: string[];
+  team_members?: Array<{ username: string; role: 'editor' | 'viewer' }>;
   created_at: Date;
   updated_at: Date;
   members?: ProjectMemberPublic[];

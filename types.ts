@@ -74,4 +74,5 @@ export interface Project {
   createdAt: number;
   githubRepoUrl?: string; // Optional: URL to an associated GitHub repository
   teamMemberUsernames?: string[]; // Optional: List of GitHub usernames for simulated team members
+  teamMembers?: Array<{ username: string; role: 'editor' | 'viewer' }>;
 }

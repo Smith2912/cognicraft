@@ -13,6 +13,7 @@ import projectRoutes from './routes/projects.js';
 import canvasRoutes from './routes/canvas.js';
 import openclawRoutes from './routes/openclaw.js';
 import { addClient, removeClient } from './services/openclawHub.js';
+import { isLocalSocket } from './middleware/openclawAuth.js';
 
 const app = express();
 
@@ -41,8 +42,17 @@ app.use(cors({
 const limiter = rateLimit({
   windowMs: config.RATE_LIMIT_WINDOW_MS,
   max: config.RATE_LIMIT_MAX_REQUESTS,
-  message: 'Too many requests from this IP, please try again later.'
+  message: 'Too many requests from this IP, please try again later.',
+  skip: (req) => req.path.startsWith('/v1/openclaw')
 });
+
+const authLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 30,
+  message: 'Too many authentication attempts, please try again later.'
+});
+
+app.use('/api/v1/auth', authLimiter);
 app.use('/api', limiter);
 
 // Body parsing middleware
@@ -108,7 +118,17 @@ wss.on('connection', (socket, request) => {
       return;
     }
 
-    if (process.env.OPENCLAW_TOKEN && token !== process.env.OPENCLAW_TOKEN) {
+    const allowRemote = config.OPENCLAW_ALLOW_REMOTE === true;
+    const remoteAddress = request.socket?.remoteAddress || null;
+    const host = request.headers.host || null;
+    const origin = request.headers.origin || null;
+
+    if (!allowRemote && !isLocalSocket(remoteAddress, host, origin)) {
+      socket.close();
+      return;
+    }
+
+    if (config.OPENCLAW_TOKEN && token !== config.OPENCLAW_TOKEN) {
       socket.close();
       return;
     }

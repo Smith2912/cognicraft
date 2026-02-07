@@ -2,6 +2,7 @@ import express from 'express';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth.js';
 import { Project, User, Node, Edge } from '../models/index.js';
 import { body, param, validationResult } from 'express-validator';
+import { Op } from 'sequelize';
 
 const router = express.Router();
 
@@ -18,7 +19,21 @@ const validateProject = [
   body('team_member_usernames')
     .optional()
     .isArray()
-    .withMessage('Team member usernames must be an array')
+    .withMessage('Team member usernames must be an array'),
+  body('team_members')
+    .optional()
+    .isArray()
+    .withMessage('Team members must be an array'),
+  body('team_members.*.username')
+    .optional()
+    .isString()
+    .trim()
+    .isLength({ min: 1 })
+    .withMessage('Team member username is required'),
+  body('team_members.*.role')
+    .optional()
+    .isIn(['editor', 'viewer'])
+    .withMessage('Team member role must be editor or viewer')
 ];
 
 const validateProjectId = [
@@ -44,7 +59,8 @@ const checkValidation = (req: express.Request, res: express.Response): boolean =
 // Helper function to check project ownership/access
 const checkProjectAccess = async (
   projectId: string, 
-  userId: string, 
+  userId: string,
+  username: string,
   requiredPermission: 'read' | 'write' = 'read'
 ): Promise<Project | null> => {
   try {
@@ -56,12 +72,23 @@ const checkProjectAccess = async (
       return null;
     }
 
-    // For now, only owner has access (team members will be added later)
-    if (project.owner_user_id !== userId) {
-      return null;
+    const teamUsernames = Array.isArray(project.team_member_usernames)
+      ? project.team_member_usernames
+      : [];
+    const teamMembers = Array.isArray(project.team_members)
+      ? project.team_members
+      : [];
+
+    const isOwner = project.owner_user_id === userId;
+    const memberEntry = teamMembers.find(member => member?.username === username);
+    const isTeamMember = !!memberEntry || teamUsernames.includes(username);
+    const role = memberEntry?.role || (isTeamMember ? 'editor' : undefined);
+
+    if (requiredPermission === 'write') {
+      return (isOwner || role === 'editor') ? project : null;
     }
 
-    return project;
+    return (isOwner || isTeamMember) ? project : null;
   } catch (error) {
     return null;
   }
@@ -73,7 +100,13 @@ router.get('/', authenticateToken, async (req: express.Request, res: express.Res
     const user = (req as AuthenticatedRequest).user;
     
     const projects = await Project.findAll({
-      where: { owner_user_id: user.id },
+      where: {
+        [Op.or]: [
+          { owner_user_id: user.id },
+          { team_member_usernames: { [Op.contains]: [user.username] } },
+          { team_members: { [Op.contains]: [{ username: user.username }] } }
+        ]
+      },
       include: [{ model: User, as: 'owner' }],
       order: [['updated_at', 'DESC']]
     });
@@ -104,7 +137,7 @@ router.get('/:projectId',
         return res.status(400).json({ error: 'Bad Request', message: 'Project ID is required' });
       }
 
-      const project = await checkProjectAccess(projectId, user.id, 'read');
+      const project = await checkProjectAccess(projectId, user.id, user.username, 'read');
       
       if (!project) {
         return res.status(404).json({
@@ -144,12 +177,20 @@ router.post('/',
 
     try {
       const user = (req as AuthenticatedRequest).user;
-      const { name, github_repo_url } = req.body;
+      const { name, github_repo_url, team_member_usernames, team_members } = req.body;
+
+      const normalizedMembers = Array.isArray(team_members) && team_members.length > 0
+        ? team_members
+        : (Array.isArray(team_member_usernames) ? team_member_usernames.map((username: string) => ({ username, role: 'editor' })) : []);
+
+      const normalizedUsernames = normalizedMembers.map((member: any) => member.username);
 
       const project = await Project.create({
         name,
         github_repo_url,
-        owner_user_id: user.id
+        owner_user_id: user.id,
+        team_member_usernames: normalizedUsernames,
+        team_members: normalizedMembers
       });
 
       const projectWithOwner = await Project.findByPk(project.id, {
@@ -179,13 +220,13 @@ router.put('/:projectId',
     try {
       const user = (req as AuthenticatedRequest).user;
       const { projectId } = req.params;
-      const { name, github_repo_url } = req.body;
+      const { name, github_repo_url, team_member_usernames, team_members } = req.body;
 
       if (!projectId) {
         return res.status(400).json({ error: 'Bad Request', message: 'Project ID is required' });
       }
 
-      const project = await checkProjectAccess(projectId, user.id, 'write');
+      const project = await checkProjectAccess(projectId, user.id, user.username, 'write');
       
       if (!project) {
         return res.status(404).json({
@@ -194,7 +235,18 @@ router.put('/:projectId',
         });
       }
 
-      await project.update({ name, github_repo_url });
+      const normalizedMembers = Array.isArray(team_members) && team_members.length > 0
+        ? team_members
+        : (Array.isArray(team_member_usernames) ? team_member_usernames.map((username: string) => ({ username, role: 'editor' })) : []);
+
+      const normalizedUsernames = normalizedMembers.map((member: any) => member.username);
+
+      await project.update({
+        name,
+        github_repo_url,
+        team_member_usernames: normalizedUsernames,
+        team_members: normalizedMembers
+      });
 
       const updatedProject = await Project.findByPk(projectId, {
         include: [{ model: User, as: 'owner' }]
@@ -227,7 +279,7 @@ router.delete('/:projectId',
         return res.status(400).json({ error: 'Bad Request', message: 'Project ID is required' });
       }
 
-      const project = await checkProjectAccess(projectId, user.id, 'write');
+      const project = await checkProjectAccess(projectId, user.id, user.username, 'write');
       
       if (!project) {
         return res.status(404).json({

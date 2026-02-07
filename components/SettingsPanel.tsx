@@ -11,7 +11,12 @@ import { User, Project } from '../types';
 interface EditableProjectDetails {
   name: string;
   githubRepoUrl: string;
-  teamMemberUsernames: string; // Comma-separated string for input
+  teamMemberUsernames: string; // Comma-separated string for input (legacy)
+}
+
+interface EditableTeamMember {
+  username: string;
+  role: 'editor' | 'viewer';
 }
 
 interface SettingsPanelProps {
@@ -25,10 +30,15 @@ interface SettingsPanelProps {
   onCreateProject: (projectName: string) => void; 
   onSwitchProject: (projectId: string) => void; 
   onDeleteProject: (projectId: string) => void; 
-  onUpdateProjectDetails: (projectId: string, updates: Partial<Pick<Project, 'name' | 'githubRepoUrl' | 'teamMemberUsernames'>>) => void;
+  onUpdateProjectDetails: (projectId: string, updates: Partial<Pick<Project, 'name' | 'githubRepoUrl' | 'teamMemberUsernames' | 'teamMembers'>>) => void;
   onExportMarkdown: () => void; 
   currentNodesCount: number; 
   currentProjectId: string | null;
+  recentOpenclawActions: Array<{ action: string; payload?: any; timestamp: number }>;
+  requireAiApproval: boolean;
+  onToggleAiApproval: (value: boolean) => void;
+  pendingAiActions: Array<{ id: string; projectId: string; actions: Array<{ action: string; title?: string; parentNodeTitle?: string; subtasks?: Array<{ title: string }> }> }>;
+  onApplyPendingAiAction: (pendingId: string) => void;
 }
 
 interface SettingsSectionProps {
@@ -64,12 +74,17 @@ const SettingsPanel = ({
   onUpdateProjectDetails,
   onExportMarkdown,
   currentNodesCount,
-  currentProjectId,
+  recentOpenclawActions,
+  requireAiApproval,
+  onToggleAiApproval,
+  pendingAiActions,
+  onApplyPendingAiAction,
 }: SettingsPanelProps): JSX.Element | null => {
   const [githubUsername, setGithubUsername] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editableProjectData, setEditableProjectData] = useState<EditableProjectDetails>({ name: '', githubRepoUrl: '', teamMemberUsernames: '' });
+  const [editableTeamMembers, setEditableTeamMembers] = useState<EditableTeamMember[]>([]);
 
   useEffect(() => {
     const styleId = 'settings-panel-animation-style';
@@ -122,23 +137,50 @@ const SettingsPanel = ({
       githubRepoUrl: project.githubRepoUrl || '',
       teamMemberUsernames: (project.teamMemberUsernames || []).join(', ')
     });
+
+    const members = project.teamMembers?.length
+      ? project.teamMembers
+      : (project.teamMemberUsernames || []).map(username => ({ username, role: 'editor' as const }));
+    setEditableTeamMembers(members);
   };
 
   const handleSaveProjectDetails = () => {
     if (!editingProjectId) return;
     const usernamesArray = editableProjectData.teamMemberUsernames.split(',')
       .map(u => u.trim()).filter(u => u);
+
+    const normalizedMembers = editableTeamMembers.length
+      ? editableTeamMembers.map(member => ({
+          username: member.username.trim(),
+          role: member.role
+        })).filter(member => member.username)
+      : usernamesArray.map(username => ({ username, role: 'editor' as const }));
     
     onUpdateProjectDetails(editingProjectId, {
       name: editableProjectData.name.trim() || "Untitled Project", 
       githubRepoUrl: editableProjectData.githubRepoUrl.trim(),
-      teamMemberUsernames: usernamesArray,
+      teamMemberUsernames: normalizedMembers.map(member => member.username),
+      teamMembers: normalizedMembers,
     });
     setEditingProjectId(null);
   };
 
   const handleCancelEdit = () => {
     setEditingProjectId(null);
+  };
+
+  const handleAddTeamMember = () => {
+    setEditableTeamMembers(prev => [...prev, { username: '', role: 'editor' }]);
+  };
+
+  const handleTeamMemberChange = (index: number, field: 'username' | 'role', value: string) => {
+    setEditableTeamMembers(prev => prev.map((member, idx) => (
+      idx === index ? { ...member, [field]: value } : member
+    )));
+  };
+
+  const handleRemoveTeamMember = (index: number) => {
+    setEditableTeamMembers(prev => prev.filter((_, idx) => idx !== index));
   };
   
   const handleEditableInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -184,6 +226,34 @@ const SettingsPanel = ({
         </div>
         
         <div className="space-y-6">
+          <SettingsSection title="AI Safety" icon={<AcademicCapIcon className="w-5 h-5" />}>
+            <label className="flex items-center justify-between text-sm">
+              <span>Require approval before applying AI actions</span>
+              <input
+                type="checkbox"
+                checked={requireAiApproval}
+                onChange={(e) => onToggleAiApproval(e.target.checked)}
+                className="h-4 w-4"
+              />
+            </label>
+            {requireAiApproval && pendingAiActions.length > 0 && (
+              <div className="text-xs text-dark-text-secondary space-y-2">
+                <div className="font-semibold text-dark-text-primary">Pending AI actions</div>
+                {pendingAiActions.map(item => (
+                  <div key={item.id} className="p-2 bg-dark-surface rounded-md border border-dark-border">
+                    <div className="text-dark-text-primary">{item.actions.length} action(s)</div>
+                    <button
+                      type="button"
+                      onClick={() => onApplyPendingAiAction(item.id)}
+                      className="text-xs mt-1 px-2 py-1 rounded-md bg-dark-accent hover:bg-dark-accent-hover text-white"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SettingsSection>
           {/* Account Section */}
           <SettingsSection title="Account" icon={<UserCircleIcon className="w-5 h-5" />}>
             {currentUser ? (
@@ -282,8 +352,42 @@ const SettingsPanel = ({
                           <input type="text" name="githubRepoUrl" value={editableProjectData.githubRepoUrl} onChange={handleEditableInputChange} placeholder="https://github.com/user/repo" className="w-full p-1.5 bg-dark-card border-dark-border rounded-md text-sm"/>
                         </div>
                         <div>
-                          <label className="text-xs text-dark-text-secondary block mb-0.5">Team (Usernames, comma-separated)</label>
-                          <input type="text" name="teamMemberUsernames" value={editableProjectData.teamMemberUsernames} onChange={handleEditableInputChange} placeholder="user1, user2" className="w-full p-1.5 bg-dark-card border-dark-border rounded-md text-sm"/>
+                          <label className="text-xs text-dark-text-secondary block mb-0.5">Team Members</label>
+                          <div className="space-y-2">
+                            {editableTeamMembers.map((member, index) => (
+                              <div key={index} className="flex items-center space-x-2">
+                                <input
+                                  type="text"
+                                  value={member.username}
+                                  onChange={(e) => handleTeamMemberChange(index, 'username', e.target.value)}
+                                  placeholder="GitHub username"
+                                  className="flex-1 p-1.5 bg-dark-card border-dark-border rounded-md text-sm"
+                                />
+                                <select
+                                  value={member.role}
+                                  onChange={(e) => handleTeamMemberChange(index, 'role', e.target.value)}
+                                  className="p-1.5 bg-dark-card border-dark-border rounded-md text-sm"
+                                >
+                                  <option value="editor">Editor</option>
+                                  <option value="viewer">Viewer</option>
+                                </select>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveTeamMember(index)}
+                                  className="text-xs text-red-400 hover:text-red-300"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={handleAddTeamMember}
+                              className="text-xs text-dark-text-secondary hover:text-dark-text-primary"
+                            >
+                              + Add team member
+                            </button>
+                          </div>
                         </div>
                         <div className="flex justify-end space-x-2 mt-2">
                           <button onClick={handleCancelEdit} className="text-xs px-3 py-1 rounded-md bg-dark-border hover:bg-dark-card/80">Cancel</button>
@@ -301,12 +405,24 @@ const SettingsPanel = ({
                                   </a>
                               )}
                           </div>
-                          {(project.teamMemberUsernames && project.teamMemberUsernames.length > 0) && (
-                              <div className="flex space-x-1 mt-1.5">
-                                  {project.teamMemberUsernames.slice(0, 5).map(username => (
-                                      <img key={username} src={`https://github.com/${username.trim()}.png`} alt={username} title={username} className="w-4 h-4 rounded-full border border-dark-card"/>
-                                  ))}
-                                  {project.teamMemberUsernames.length > 5 && <span className="text-xs text-dark-text-secondary/70 self-center">+{project.teamMemberUsernames.length - 5}</span>}
+                          {((project.teamMembers && project.teamMembers.length > 0) || (project.teamMemberUsernames && project.teamMemberUsernames.length > 0)) && (
+                              <div className="flex flex-col space-y-1 mt-1.5">
+                                  <div className="flex space-x-1">
+                                    {(project.teamMembers?.length ? project.teamMembers.map(member => member.username) : (project.teamMemberUsernames || [])).slice(0, 5).map(username => (
+                                        <img key={username} src={`https://github.com/${username.trim()}.png`} alt={username} title={username} className="w-4 h-4 rounded-full border border-dark-card"/>
+                                    ))}
+                                    {(project.teamMembers?.length ? project.teamMembers.length : (project.teamMemberUsernames?.length || 0)) > 5 && (
+                                      <span className="text-xs text-dark-text-secondary/70 self-center">+
+                                        {(project.teamMembers?.length ? project.teamMembers.length : (project.teamMemberUsernames?.length || 0)) - 5}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {project.teamMembers && project.teamMembers.length > 0 && (
+                                    <div className="text-xs text-dark-text-secondary">
+                                      {project.teamMembers.slice(0, 3).map(member => `${member.username} (${member.role})`).join(', ')}
+                                      {project.teamMembers.length > 3 && ` +${project.teamMembers.length - 3} more`}
+                                    </div>
+                                  )}
                               </div>
                           )}
                         </div>
@@ -369,6 +485,23 @@ const SettingsPanel = ({
             </div>
           </SettingsSection>
           
+          <SettingsSection title="OpenClaw Actions" icon={<AcademicCapIcon className="w-5 h-5" />}>
+            {recentOpenclawActions.length === 0 ? (
+              <p className="text-sm text-dark-text-secondary">No recent OpenClaw actions.</p>
+            ) : (
+              <div className="max-h-48 overflow-y-auto space-y-2 text-xs">
+                {recentOpenclawActions.map((entry, index) => (
+                  <div key={`${entry.timestamp}-${index}`} className="p-2 bg-dark-surface rounded-md border border-dark-border">
+                    <div className="text-dark-text-primary font-semibold">{entry.action}</div>
+                    <div className="text-dark-text-secondary">
+                      {new Date(entry.timestamp).toLocaleTimeString()} — {entry.payload?.title || entry.payload?.parentNodeTitle || ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SettingsSection>
+
           <SettingsSection title="Data Management" icon={<ArrowDownTrayIcon className="w-5 h-5" />}>
             <button
               onClick={onExportMarkdown}
