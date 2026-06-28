@@ -2,7 +2,7 @@ import express from 'express';
 import { authenticateToken, AuthenticatedRequest } from '../middleware/auth.js';
 import { Project, User, Node, Edge } from '../models/index.js';
 import { body, param, validationResult } from 'express-validator';
-import { Op } from 'sequelize';
+import { Op, WhereOptions } from 'sequelize';
 
 const router = express.Router();
 
@@ -99,14 +99,16 @@ router.get('/', authenticateToken, async (req: express.Request, res: express.Res
   try {
     const user = (req as AuthenticatedRequest).user;
     
+    const accessWhere = {
+      [Op.or]: [
+        { owner_user_id: user.id },
+        { team_member_usernames: { [Op.contains]: [user.username] } },
+        { team_members: { [Op.contains]: [{ username: user.username }] } }
+      ]
+    } as WhereOptions;
+
     const projects = await Project.findAll({
-      where: {
-        [Op.or]: [
-          { owner_user_id: user.id },
-          { team_member_usernames: { [Op.contains]: [user.username] } },
-          { team_members: { [Op.contains]: [{ username: user.username }] } }
-        ]
-      },
+      where: accessWhere,
       include: [{ model: User, as: 'owner' }],
       order: [['updated_at', 'DESC']]
     });
@@ -305,4 +307,4 @@ router.delete('/:projectId',
   }
 );
 
-export default router; 
+export default router;
